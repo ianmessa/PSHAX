@@ -1,0 +1,7 @@
+*.csv
+*.xls
+*.m.txt
+*.xlsx
+*.pyc
+*.txt
+sources/*
