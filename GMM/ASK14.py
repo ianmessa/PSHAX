@@ -5,7 +5,7 @@ from jax import numpy as jnp
 import polars as pl
 import re
 
-from GMM.gmm_scenario import *
+from gm_scenario import *
 
 ##### GROUND MOTION COEFFICIENTS #####
 gmc = pl.read_csv('ask14_coeffs.csv')
@@ -238,7 +238,7 @@ def fn_regional(V_lin, a, v_1,
 def fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
           mag, W, dip, Z_TOR, SOF, HW_flag,
           R_rup, R_jb, R_x, R_y0, 
-          vs30, SA, z1, region:str):
+          vs30, z1, region:str, SA):
     fn_1_out = fn_1(c4, M, a, 
                     mag, R_rup)
     fn_4_out = fn_4(a, 
@@ -300,21 +300,21 @@ def fn_ASK14_sig(V_lin, b, n, c, s, s_est,
     return sig
 
 #### FINAL MODEL ####
-def fn_ASK14(scenario:gmm_scenario, coeffs:list = coeffs):
+def fn_ASK14(scn:gm_scenario, coeffs:list = coeffs):
 
     T, V_lin, b, n, c, c4, M, a, s_est, s, v_1 = coeffs
 
     SA1180 = jnp.exp(fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
-                              mag, W, dip, Z_TOR, SOF, HW_flag,
-                              R_rup, R_jb, R_x, R_y0, 
-                              1180., 0., -1., region))
+                              scn.Mw, scn.width, scn.dip, scn.z_tor, scn.SOF, scn.HW_flag,
+                              scn.R_rup, scn.R_jb, scn.R_x, scn.R_y0, 
+                              1180., 0., scn.region, -1.))
     
     lnSA = fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
-                     Mw, W, dip, Z_TOR, SOF, HW_flag,
-                     R_rup, R_jb, R_x, R_y0, 
-                     vs30, SA1180, z1, region)
+                     scn.Mw, scn.width, scn.dip, scn.z_tor, scn.SOF, scn.HW_flag,
+                     scn.R_rup, scn.R_jb, scn.R_x, scn.R_y0, 
+                     scn.vs30, scn.z1p0, scn.region, SA1180)
     
     std = fn_ASK14_sig(V_lin, b, n, c, s, s_est, 
-                 region, mag, R_rup, vs30, vs30_flag, SA1180)
+                 scn.region, scn.Mw, scn.R_rup, scn.vs30, scn.vs30_flag, SA1180)
 
     return T, lnSA, std

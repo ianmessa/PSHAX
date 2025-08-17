@@ -14,14 +14,14 @@ def uv_normal(mu:float, std:float, x:jax.Array) -> jax.Array:
     return num / denom
 
 # Univariate bump function.
-def uv_bump(x, a:float = 1, b:float= 1, c:float = 1, d:float = 0):
+def uv_bump(x, a:float = 1, b:float= 1, c:float = 10):
     """ Bump function normalized to 1-max. 
     x is input. 
     a, b, c, d for amplitude, width, shape, and displacement, respectively."""
     b, c = [jnp.clip(p, min = 1E-2) for p in [b, c]]
-    f = a * jnp.exp(c ** (-2) + (b ** 2) / (c ** 2 * (((x - d) ** 2) - b ** 2)))
-    cond = jnp.any(jnp.stack([x < (d - b), 
-                              x > (d + b), 
+    f = a * jnp.exp(c ** (-2) + (b ** 2) / (c ** 2 * (((x) ** 2) - b ** 2)))
+    cond = jnp.any(jnp.stack([x < -b, 
+                              x > b, 
                               jnp.isinf(jnp.abs(f))]), 
                         axis = 0)
     f = jnp.where(cond, 0, f)
