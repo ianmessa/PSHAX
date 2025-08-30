@@ -1,5 +1,6 @@
 import jax
 from jax import lax
+from jax.tree_util import Partial
 from jax import numpy as jnp
 
 import polars as pl
@@ -13,9 +14,11 @@ gmc_col = gmc.columns
 gmc = gmc.to_jax()
 
 # First few
-T, V_lin, b, n, c = gmc[:, :5].T
+T, v_lin, b, n, c = gmc[:, :5].T
 c4 = gmc[:, 5]
 M = gmc[:, 6:8].T
+M_empty = jnp.zeros((1, M.shape[-1]))
+M = jnp.insert(M, 0, M_empty, axis = 0)
 
 # Lots of a_ns, so we'll make an array for them.
 #   Start with the actual columns.
@@ -35,286 +38,232 @@ s_est = gmc[:, 38:40].T
 s_empty = jnp.zeros((1, s_est.shape[-1]))
 s_est = jnp.insert(s_est, 0, s_empty, axis = 0)
 s = gmc[:, 40:].T
-s = jnp.insert(s, 0, s_empty, axis = 0)
+s_n = jnp.insert(s, 0, s_empty, axis = 0)
 
-# Also defining V_1 so we don't need to do it twice
-v_1 = jnp.exp(-0.35 * jnp.log(T / 0.5) + jnp.log(1500))
-v_1 = v_1.at[T <= 0.5].set(1500)
-v_1 = v_1.at[T >= 3].set(800)
+# Also defining v1 so we don't need to do it twice
+v1 = jnp.exp(-0.35 * jnp.log(T / 0.5) + jnp.log(1500))
+v1 = v1.at[T <= 0.5].set(1500)
+v1 = v1.at[T >= 3].set(800)
 
-coeffs = [T, V_lin, b, n, c, c4, M, a, s_est, s, v_1]
+#### MAIN MODEL ####
+# Base model (section 4.1)
+def f1(Mw, R_rup):
+    # Just clip c4_magnitud instead of if/else
+    c4_mag = jnp.clip(c4 - (c4 - 1) * (5 - Mw), min = c4, max = 1)
+    R = (R_rup ** 2 + c4_mag ** 2) ** (1/2)
 
-##### MAIN MODEL #####
-# Base model (Section 4.1)
-def fn_1(c4, M, a, 
-         mag, R_rup):
-    # Get c4
-    c4_which = jnp.array([mag >= 5, 
-                          mag >= 4, 
-                          mag >=0])
-    # (Make condition exclusive. This trick will be used throughout.)
-    c4_idx = jnp.argmax(c4_which)
-    c4_returns = jnp.array([c4, 
-                            c4 - (c4-1) * (5 - mag), 
-                            jnp.ones_like(c4)])
-    c4_mag = lax.dynamic_slice(c4_returns, (c4_idx, 0), (1, c4.shape[0]))[0]
+    # Common among all cases
+    base = a[1] + (a[2] + a[3] * (Mw - M[1])) * jnp.log(R) + a[17] * R_rup
 
-    # Get R
-    R = jnp.sqrt(R_rup ** 2 + c4_mag **2)
-
-    # Get base
-    base_which = jnp.array([jnp.all(mag <= M[2]),
-                            jnp.all(mag <= M[1]), 
-                            jnp.all(M > M[2])])
-    # Render exclusive since M1 
-    base_which = jnp.argmax(base_which)
-
-    def base_return_1(mag, R_rup): 
-        return (a[1] + 
-                a[6] * (mag - M[2]) + 
-                a[7] * (mag - M[2]) ** 2 + 
-                a[4] * (M[2] - M[1]) + 
-                a[8] * (8.5 - M[2]) **2 + 
-                (a[2] + a[3] * (M[2] - M[1])) * jnp.log(R) + 
-                a[17] * R_rup)
-    def base_return_2(mag, R_rup):
-        return (a[1] + 
-                a[4] * (mag - M[1]) + 
-                a[8] * (8.5 - mag) ** 2 + 
-                (a[2] + a[3] * (M[2] - M[1])) * jnp.log(R) + 
-                a[17] * R_rup)
-    def base_return_3(mag, R_rup):
-        return (base_return_2(mag, R_rup) - 
-                a[4] * (mag - M[1]) + 
-                a[5] * (mag - M[1]))
+    # Double leq conditional index
+    cond = (Mw <= M[2]).astype(int) + (Mw <= M[1]).astype(int)
     
-    base_returns = ([base_return_1, 
-                     base_return_2, 
-                     base_return_3])
+    # Conditional elements
+    a_MM = lax.select_n(cond, a[5] * (Mw - M[1]), a[4] * (Mw - M[1]), a[6] * (Mw - M[2]))
+    a_MM2 = lax.select(Mw <= M[2], a[7] * (8.5 - M[2]) ** 2, a[8] * (8.5 - Mw) ** 2)
+    a_MM_min = lax.select(Mw <= M[2], a[4] * (M[2] - M[1]) + a[8] * (8.5 - M[2]) ** 2, a[0])
     
-    base = lax.switch(base_which, base_returns, mag, R_rup)
+    # Sum base and conditionals to get final gmp
+    return base + a_MM + a_MM2 + a_MM_min
 
-    return base
-
-# Hanging wall model
-#   May need to refactor using housed functions.
-def fn_4(a,
-         HW_flag, dip, W, mag, Z_TOR, R_x, R_jb, R_y0):
-    # If HW flag:
-    def HW_true(dip, W, mag, Z_TOR, R_x, R_jb, R_y0):
-        # Get hanging wall taper 1 (4.11)
-        HW_tpr1 = jnp.max(jnp.array([60, 90 - dip])) / 45
-        
-        # Get hanging wall taper 2 (4.12)
-        HW_a2 = 0.2
-        HW_tpr2_which = jnp.array([mag > 6.5, 
-                                    mag > 5.5, 
-                                    mag > 0])
-        HW_tpr2_idx = jnp.argmax(HW_tpr2_which)
-        HW_tpr2_base = 1 + HW_a2 * (mag - 6.5)
-        HW_tpr2_returns = jnp.array([HW_tpr2_base,
-                                     HW_tpr2_base - (1 - HW_a2) * (mag - 6.5) ** 2, 
-                                     0])
-        HW_tpr2 = lax.dynamic_slice(HW_tpr2_returns, (HW_tpr2_idx,), (1,))[0]
-        
-        # Get hanging wall taper 3 (4.13)
-        h1, h2, h3 = 0.25, 1.5, -0.75
-        R1 = W * jnp.cos(dip * jnp.pi)
-        R2 = 3 * R1
-        HW_tpr3_which = jnp.array([R_x <= R1,
-                                R_x <= R2,
-                                R_x > R2])
-        HW_tpr3_idx = jnp.argmax(HW_tpr3_which)
-        HW_tpr3_returns = jnp.array([h1 + h2 * (R_x / R1) + h3 * (R_x / R1) ** 2,
-                                     1 - (R_x - R1)/(2 * R1),
-                                     0])
-        HW_tpr3 = lax.dynamic_slice(HW_tpr3_returns, (HW_tpr3_idx,), (1,))[0]
-        
-        # And taper 4 (eq 4.14)...
-        HW_tpr4_Z_term = jnp.clip((Z_TOR ** 2) / 100, min = 0, max = 1)
-        HW_tpr4 = 1 - HW_tpr4_Z_term
-
-        # And taper 5 thank god (eq 4.15)
-        # Oh it's two parts. Here's the first (4.15a)...
-        R_y1 = R_x * jnp.tan(20 * jnp.pi / 180)
-        HW_tpr5a_R_term = jnp.clip((R_y0 - R_y1) / 5, min = 0, max = 1)
-        HW_tpr5a = 1 - HW_tpr5a_R_term
-
-        # And the second (4.15b).
-        HW_tpr5b_R_jb = jnp.clip(R_jb / 30, min = 0, 
-                            max = 1)
-        HW_tpr5b = 1 - HW_tpr5b_R_jb
-
-        # Conditions.
-        HW_tpr5 = lax.select(R_y0 >= 0, HW_tpr5a, HW_tpr5b)
-
-        return a[13] * HW_tpr1 * HW_tpr2 * HW_tpr3 * HW_tpr4 * HW_tpr5
-    
-    # If not:
-    def HW_false(dip, W, mag, Z_TOR, R_x, R_jb, R_y0):
-        return a[13] * 0
-    
-    return lax.cond(HW_flag, HW_true, HW_false, dip, 
-                                           W, 
-                                           mag, 
-                                           Z_TOR, 
-                                           R_x, R_jb, R_y0)
-
-# Site response
-def fn_5(V_lin, b, n, c, a, v_1,
-         vs30, SA):
-    V_star= jnp.clip(v_1, min = 0, max = vs30)
-
-    site_1 = (a[10] + b * n) * jnp.log(V_star/ V_lin)
-    site_2 = (a[10] * jnp.log(V_star/ V_lin) - 
-                      b * jnp.log(SA + c) + 
-                      b * jnp.log(SA + c * (V_star/ V_lin) ** n))
-    
-    site = lax.select(V_lin >= vs30, site_2, site_1)
-
-    return site
-
-# Z_TOR model
-def fn_6(a, 
-         Z_TOR):
-    return a[15] * jnp.clip(Z_TOR / 20, min = 0, max = 1)
-
-# Style of Faulting model
-def fn_7_fn_8(a,
-              mag, SOF):
-    # Combine normal and reverse.
-    #   Matlab is verbose!
-    F_SOF = jnp.round(jnp.abs(SOF) + 1e-12)
+# SOF (section 4.2)
+#   Combining f7, f8 into one fn
+def f7_8(Mw, SOF):
+    # Just double-select a instead of two separate functions,
+    #   many of whose branches return 0s
     a_SOF = lax.select(SOF > 0, a[11], a[12])
-    mag_SOF = jnp.clip(mag - 4, min = 0, max = 1)
+    a_SOF = lax.select(jnp.abs(SOF) > 0.5, a_SOF, a[0]) 
+    # Just clip instead of if/elseif/else
+    return a_SOF * jnp.clip(Mw - 4, min = 0, max = 1)
 
-    return F_SOF * a_SOF * mag_SOF
+# Site response (4.3)
+def f5(SA_rock, vs30):
+    # Straightforward
+    vs30_arr = jnp.full_like(v1, vs30)
+    vs30_star = jnp.clip(vs30_arr, max = v1)
 
-# Soil depth model
-def fn_10(
-          z1, vs30, region):
-    const = lax.select(region == 10, 
-                                           jnp.array([-5.23, 2., 412.]),
-                                           jnp.array([-7.67, 4., 610.]))
+    site = (a[10] + b * n) * jnp.log(vs30_star / v_lin)
+    site2 = site - \
+            b * jnp.log(SA_rock + c) + \
+            b * jnp.log(SA_rock + c * (vs30_star / v_lin) ** n)
     
-    z1_ref = jnp.exp(const[0] / const[1] * 
-                     jnp.log((vs30 ** const[1] + const[2] ** const[1]) / 
-                             1360 ** const[1] + const[2] ** const[1]))
-    z1_ref = z1_ref / 1000
+    return lax.select(v_lin >= vs30, site2, site)
+
+# Hanging wall (4.4)
+    # Only calculate if HW_flag is 1
+def f4(Mw, dip, width, 
+       R_x, R_jb, R_y0, 
+       z_tor):
+    # Clip insetad of if/else
+    HW_taper1 = jnp.clip((90 - dip) / 45, max = 60 / 45)
+
+    # Once again, clip instead of if/else
+    HW_taper2_max = 1 + 0.2 * (Mw - 6.5)
+    HW_taper2_main = HW_taper2_max - 0.8 * (Mw - 6.5) ** 2
+    HW_taper2 = jnp.clip(HW_taper2_main, min = 0, max = HW_taper2_max)
+
+    # Ugh...
+    h1, h2, h3 = 0.25, 1.5, -0.75
+    R1 = width * jnp.cos(dip * jnp.pi / 180)
+    R2 = 3 * R1
+    HW_taper3_main = 1 - (R_x / R1) / (R2 - R1)
+    HW_taper3_min = h1 + h2 * (R_x / R1) + h3 * (R_x / R1) ** 2
+    cond = (R_x < R2).astype(int) + (R_x <= R1).astype(int)
+    HW_taper3 = lax.select_n(cond, 0., HW_taper3_main, HW_taper3_min)
+
+    HW_taper4 = jnp.clip(1 - (z_tor ** 2) / 100, min = 0)
+
+    # Last one!...
+    R_y1 = R_x * jnp.tan(20 * jnp.pi / 180)
+    HW_taper5_R_y0 = jnp.clip(1 - (R_y0 - R_y1) / 5, min = 0, max = 1)
+    HW_taper5_else = jnp.clip(1 - R_jb / 30, min = 0, max = 1)
+    HW_taper5 = lax.select(R_y0 >= 0, HW_taper5_R_y0, HW_taper5_else)
+
+    return a[13] * HW_taper1 * HW_taper2 * HW_taper3 * HW_taper4 * HW_taper5
+
+# Top of rupture model (section 4.5)
+def f6(z_tor):
+    return a[15] * jnp.clip(z_tor / 20, max = 1)
+
+# Soil depth model (section 4.6; only changes anything if z1p0 < 0)
+def f10(vs30, 
+        z1p0, 
+        region):
+    # Also straightforward. See matlab implementation.
+    z1p0_ref_10 = jnp.exp(-5.23 / 2 * jnp.log((vs30 ** 2 + 412 ** 2) / (1360 ** 2 + 412 ** 2))) / 1000
+    z1p0_ref_else = jnp.exp(-7.67 / 4 * jnp.log((vs30 ** 2 + 610 ** 2) / (1360 ** 2 + 610 ** 2))) / 1000
+    z1p0_ref = lax.select(region == 10, z1p0_ref_10, z1p0_ref_else)
+    ret = lax.select(z1p0 < 0., z1p0_ref, z1p0)
+    return jnp.full_like(T, ret)
+
+# Regional model (4.8)
+def regional(R_rup, 
+             vs30, 
+             region):
+    # Big one. Start by grabbing regional indices of interest
+    TW, CN, JP = 3, 9, 10
+    # We'll use .get on this dict for other regions.
+    val_dict = dict(zip([TW, CN, JP], jnp.arange(1, 4)))
+
+    # Taiwan:
+    def f_TW():
+        # vs30* scaling
+        vs30_arr = jnp.full_like(v1, vs30)
+        vs30_star = jnp.clip(vs30_arr, min = v1)
+        f12 = a[31] * jnp.log(vs30_star / v_lin)
+        delta_TW = f12 + a[25] * R_rup
+        return delta_TW
+
+    def f_CN():
+        # easy one
+        delta_CN = a[28] * R_rup
+        return delta_CN
+
+    def f_JP():
+        # Identify midpoints of vs30 bins
+        JP_vs_mid = jnp.array([150, 250, 350, 450, 600, 850, 1150, 2000])
+        # Slam coefficients together
+        a_JP = jnp.concatenate([a[36:43], a[42:43]]).T
+        # Interpolate coefficients based on bins
+        f13 = jax.vmap(Partial(jnp.interp, x = vs30, xp = JP_vs_mid))(fp = a_JP)
+        return f13 + a[29] * R_rup
     
-    return lax.select(z1 < 0, z1_ref, z1)
+    # Other regions, no modifier
+    def f_else():
+        return a[0]
 
-# Regional model
-def fn_regional(V_lin, a, v_1,
-                region, vs30, R_rup):
-    fn_12, fn_13 = 0, 0
-    def twn(vs30):
-        V_star= jnp.clip(v_1, min = 0, max = vs30)
-        fn_12 = a[31] * jnp.log(V_star/ V_lin)
-        return fn_12 * a[25] * R_rup
+    # Selec
+    delta = lax.switch(val_dict.get(region, 0), [f_else, f_TW, f_CN, f_JP])
     
-    def cn(vs30):
-        return a[28] * R_rup
+    return delta
+
+# Cumulative lnSA model
+def f_lnSA(Mw, width, dip, 
+        R_jb, R_rup, R_x, R_y0, 
+        vs30, 
+        z1p0, z_tor, SA_rock,
+        SOF, HW_flag, region):
+    # Zeros for if HW_flag is false (0)
+    f_filler = lambda *args: a[0]
+
+    return (
+           f1(Mw, R_rup) + 
+           f7_8(Mw, SOF) + 
+           f5(SA_rock, vs30) + 
+           lax.cond(HW_flag, f4, f_filler, Mw, dip, width, R_x, R_jb, R_y0, z_tor) + 
+           f6(z_tor) +
+           f10(vs30, z1p0, region) + 
+           regional(R_rup, vs30, region)
+        )
+
+# StD model (7.1, 7.2)
+def f_std(Mw, 
+         R_rup, 
+         vs30, vs30_flag, 
+         region, SA1180):
     
-    def jpn(vs30):
-        vs_mid_bins = jnp.array([150, 250, 350, 450, 600, 850, 1150, 2000])
-        delta = jnp.concatenate([a[36:43],a[43][None]])
-        fn_13 = jnp.stack([jnp.interp(vs30, vs_mid_bins, delta.T[i]) for i in range(delta.shape[1])])
-        return fn_13 * a[29] * R_rup
+    s1 = lax.select(vs30_flag, s[1], s_est[1])
+    s2 = lax.select(vs30_flag, s[2], s_est[2])
+
+    # Normal phi
+    def phi_al_else():
+        phi_al = s1 + (s2 - s1) / 2 * (Mw - 4)
+        phi_al = jnp.clip(phi_al, min = s1, max = s2)
+        return phi_al
     
-    def other(vs30):
-        return jnp.zeros_like(a[25], dtype = float)
+    # Japan phi (just different tabular coeffs)
+    def phi_al_JP():
+        phi_al = s[5] + (s[6] - s[5]) / 50 * (R_rup - 30)
+        phi_al = jnp.clip(phi_al, min = s[5], max = s[6])
+        return phi_al
     
-    # Branches for all regions
-    region_deltas = [other] * 13
-    region_deltas[3] = twn
-    region_deltas[9] = cn
-    region_deltas[10] = jpn
+    # Select the right one
+    phi_al = lax.select(region == 10, phi_al_JP(), phi_al_else())
 
-    # We're done.
-    return lax.switch(region, region_deltas, vs30)
+    # Within-event StD
+    phi_amp = 0.4
+    phiB = (phi_al ** 2 - phi_amp ** 2) ** (1 / 2)
 
-# lnSA model
-def fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
-          mag, W, dip, Z_TOR, SOF, HW_flag,
-          R_rup, R_jb, R_x, R_y0, 
-          vs30, z1, region:str, SA):
-    fn_1_out = fn_1(c4, M, a, 
-                    mag, R_rup)
-    fn_4_out = fn_4(a, 
-                    HW_flag, dip, W, mag, Z_TOR, R_x, R_jb, R_y0)
-    fn_5_out = fn_5(V_lin, b, n, c, a, v_1, 
-                    vs30, SA)
-    fn_6_out = fn_6(a, 
-                    Z_TOR)
-    fn_7_fn_8_out = fn_7_fn_8(a, 
-                              mag, SOF)
-    fn_10_out = fn_10(
-                      z1, vs30, region)
-    regional_out = fn_regional(V_lin, a, v_1,
-                               region, vs30, R_rup)
-    return sum([fn_1_out, fn_4_out, fn_5_out, fn_6_out, fn_7_fn_8_out, fn_10_out, regional_out])
+    dAmp_dSA1180 = b * SA1180 * (-1 / (SA1180 + c) + 1 / (SA1180 + c * (vs30 / v_lin) ** n))
+    dAmp_dSA1180 = dAmp_dSA1180.at[v_lin <= vs30].set(0)
 
-#### ALEATORIC UNCERTAINTY ####
-def fn_ASK14_sig(V_lin, b, n, c, s, s_est, 
-           region:int, mag:float, R_rup:float, vs30:float, vs30_flag:bool, 
-           SA1180:jnp.ndarray):
-    s_fSig = lax.select(vs30_flag, s_est, s[:3])
+    phi = (phiB ** 2 * (1 + dAmp_dSA1180) ** 2 + phi_amp ** 2) ** (1 / 2)
 
-    def phi_AL_all(magmag:float, R_rupmag:float):
-        mag_phi_AL = jnp.clip(mag, min = 4, max = 6)
-        phi_AL = lax.select(mag_phi_AL <= 6, s_fSig[1] + (s_fSig[2] - s_fSig[1]) / (2 * (mag - 4)), s_fSig[2])
-        return phi_AL
-    
-    def phi_AL_jp(mag:float, R_rup:float):
-        phi_AL_which = jnp.array([R_rup < 30,
-                                  R_rup <= 80,
-                                  R_rup > 80])
-        phi_AL_idx = jnp.argmax(phi_AL_which)
-        phi_AL_returns = jnp.array([s[5],
-                                    s[5] + (s[6] - s[5]) / 50 * (R_rup - 30),
-                                    s[6]])
-        phi_AL = lax.dynamic_slice(phi_AL_returns, (phi_AL_idx, 0), (1, s.shape[-1]))[0]
-        return phi_AL
+    # Between-event StD
+    tauB = s[3] + (s[4] - s[3]) / 2 * (Mw - 5)
+    tauB = jnp.clip(tauB, min = s[3], max = s[4])
+    tau = tauB * (1 + dAmp_dSA1180)
 
-    phi_AL = lax.cond(region == 10, phi_AL_all, phi_AL_jp, mag, R_rup)
-
-    tau_B_which = jnp.array([mag < 5,
-                             mag <= 7,
-                             mag > 7])
-    tau_B_idx = jnp.argmax(tau_B_which)
-    tau_B_returns = jnp.array([s[3],
-                               s[3] + (s[4] - s[3]) / 2 * (mag - 5), 
-                               s[4]])
-    tau_B = lax.dynamic_slice(tau_B_returns, (tau_B_idx, 0), (1, s.shape[-1]))[0]
-
-    phi_B = (phi_AL ** 2 - 0.4 ** 2) ** (1/2)
-    drv_amp_SA1180 = b * SA1180 * (-1 / (SA1180 + c) + 1/(SA1180 + c * (vs30 / V_lin) ** n))
-    drv_bool = V_lin > vs30
-    drv_zeros = jnp.zeros_like(drv_amp_SA1180)
-    drv_amp_SA1180 = lax.select(drv_bool, drv_amp_SA1180, drv_zeros)
-
-    phi = (phi_B ** 2 * (1 + drv_amp_SA1180) ** 2 + 0.4 ** 2) ** (1/2)
-    tau = tau_B * (1 + drv_amp_SA1180)
-    sig = (phi **2 + tau **2) ** (1/2)
+    # Cumulative StD
+    sig = (phi ** 2 + tau ** 2) ** (1 / 2)
     return sig
 
-#### FINAL MODEL ####
-def fn_ASK14(scn:gm_scenario, coeffs:list = coeffs):
+# FULL MODEL
+def ASK14(scn: gm_scenario):
+    Mw, dip, rake, width = scn.Mw, scn.dip, scn.rake, scn.width
+    R_jb, R_rup, R_x, R_y0 = scn.R_jb, scn.R_rup, scn.R_x, scn.R_y0
+    vs30, vs30_flag = scn.vs30, scn.vs30_flag
+    z1p0, z2p5, z_tor = scn.z1p0, scn.z2p5, scn.z_tor
+    SOF, HW_flag, region = scn.SOF, scn.HW_flag, scn.region
 
-    T, V_lin, b, n, c, c4, M, a, s_est, s, v_1 = coeffs
-
-    SA1180 = jnp.exp(fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
-                              scn.Mw, scn.width, scn.dip, scn.z_tor, scn.SOF, scn.HW_flag,
-                              scn.R_rup, scn.R_jb, scn.R_x, scn.R_y0, 
-                              1180., 0., scn.region, -1.))
+    # Calculate SA1180 ground motions
+    lnSA1180 = f_lnSA(Mw, width, dip, 
+                      R_jb, R_rup, R_x, R_y0,
+                      1180,
+                      -1., z_tor, 
+                      0., SOF, HW_flag, region)
     
-    lnSA = fn_ASK14_lnSA(V_lin, b, n, c, c4, M, a, v_1,
-                     scn.Mw, scn.width, scn.dip, scn.z_tor, scn.SOF, scn.HW_flag,
-                     scn.R_rup, scn.R_jb, scn.R_x, scn.R_y0, 
-                     scn.vs30, scn.z1p0, scn.region, SA1180)
-    
-    std = fn_ASK14_sig(V_lin, b, n, c, s, s_est, 
-                 scn.region, scn.Mw, scn.R_rup, scn.vs30, scn.vs30_flag, SA1180)
+    # Convert from log
+    SA1180 = jnp.exp(lnSA1180)
 
+    # Plug back into lnSA and std
+    lnSA = f_lnSA(Mw, width, dip, 
+                  R_jb, R_rup, R_x, R_y0, 
+                  vs30, 
+                  z1p0, z_tor, 
+                  SA1180, SOF, HW_flag, region)
+    
+    std = f_std(Mw, R_rup, vs30, vs30_flag, region, SA1180)
+
+    # We made it.
     return T, lnSA, std
