@@ -9,7 +9,7 @@ import re
 from gm_scenario import *
 
 ##### GROUND MOTION COEFFICIENTS #####
-gmc = pl.read_csv('ask14_coeffs.csv')
+gmc = pl.read_csv('ASK14_coeffs.csv')
 gmc_col = gmc.columns
 gmc = gmc.to_jax()
 
@@ -31,14 +31,14 @@ a_empty = jnp.zeros((47, a_sparse.shape[-1]))
 # Save values.
 # INDICES MATCH COEFFICIENT NAMES IN THE PAPER. FIRST ROW WILL BE EMPTY.
 a = a_empty.at[a_idcs].set(a_sparse)
+empty = a[0]
 
 # Same thing for s_n, but it's easier.
 # AGAIN, INDICES MATCH COEFFICIENT NAMES IN THE PAPER. FIRST ROW WILL BE EMPTY.
 s_est = gmc[:, 38:40].T
-s_empty = jnp.zeros((1, s_est.shape[-1]))
-s_est = jnp.insert(s_est, 0, s_empty, axis = 0)
+s_est = jnp.insert(s_est, 0, empty, axis = 0)
 s = gmc[:, 40:].T
-s_n = jnp.insert(s, 0, s_empty, axis = 0)
+s_n = jnp.insert(s, 0, empty, axis = 0)
 
 # Also defining v1 so we don't need to do it twice
 v1 = jnp.exp(-0.35 * jnp.log(T / 0.5) + jnp.log(1500))
@@ -48,7 +48,7 @@ v1 = v1.at[T >= 3].set(800)
 #### MAIN MODEL ####
 # Base model (section 4.1)
 def f1(Mw, R_rup):
-    # Just clip c4_magnitud instead of if/else
+    # Just clip c4_magnitude instead of if/else
     c4_mag = jnp.clip(c4 - (c4 - 1) * (5 - Mw), min = c4, max = 1)
     R = (R_rup ** 2 + c4_mag ** 2) ** (1/2)
 
@@ -61,7 +61,7 @@ def f1(Mw, R_rup):
     # Conditional elements
     a_MM = lax.select_n(cond, a[5] * (Mw - M[1]), a[4] * (Mw - M[1]), a[6] * (Mw - M[2]))
     a_MM2 = lax.select(Mw <= M[2], a[7] * (8.5 - M[2]) ** 2, a[8] * (8.5 - Mw) ** 2)
-    a_MM_min = lax.select(Mw <= M[2], a[4] * (M[2] - M[1]) + a[8] * (8.5 - M[2]) ** 2, a[0])
+    a_MM_min = lax.select(Mw <= M[2], a[4] * (M[2] - M[1]) + a[8] * (8.5 - M[2]) ** 2, empty)
     
     # Sum base and conditionals to get final gmp
     return base + a_MM + a_MM2 + a_MM_min
@@ -71,8 +71,8 @@ def f1(Mw, R_rup):
 def f7_8(Mw, SOF):
     # Just double-select a instead of two separate functions,
     #   many of whose branches return 0s
-    a_SOF = lax.select(SOF > 0, a[11], a[12])
-    a_SOF = lax.select(jnp.abs(SOF) > 0.5, a_SOF, a[0]) 
+    a_SOF = lax.select(SOF < 0, a[11], a[12])
+    a_SOF = lax.select(jnp.abs(SOF) > 0.5, a_SOF, empty) 
     # Just clip instead of if/elseif/else
     return a_SOF * jnp.clip(Mw - 4, min = 0, max = 1)
 
@@ -140,10 +140,8 @@ def f10(vs30,
 def regional(R_rup, 
              vs30, 
              region):
-    # Big one. Start by grabbing regional indices of interest
-    TW, CN, JP = 3, 9, 10
-    # We'll use .get on this dict for other regions.
-    val_dict = dict(zip([TW, CN, JP], jnp.arange(1, 4)))
+    # Big one. Convert regional indices from (all else, 3, 9, 10) to (0, 1, 2, 3)
+    region_post = jnp.sum(jnp.cumsum(jnp.array([region == i for i in [3, 9, 10]])))
 
     # Taiwan:
     def f_TW():
@@ -169,11 +167,10 @@ def regional(R_rup,
         return f13 + a[29] * R_rup
     
     # Other regions, no modifier
-    def f_else():
-        return a[0]
+    f_empty = lambda: empty
 
-    # Selec
-    delta = lax.switch(val_dict.get(region, 0), [f_else, f_TW, f_CN, f_JP])
+    # Select region
+    delta = lax.switch(region_post, [f_empty, f_TW, f_CN, f_JP])
     
     return delta
 
@@ -184,7 +181,7 @@ def f_lnSA(Mw, width, dip,
         z1p0, z_tor, SA_rock,
         SOF, HW_flag, region):
     # Zeros for if HW_flag is false (0)
-    f_filler = lambda *args: a[0]
+    f_filler = lambda *args: empty
 
     return (
            f1(Mw, R_rup) + 
@@ -197,7 +194,7 @@ def f_lnSA(Mw, width, dip,
         )
 
 # StD model (7.1, 7.2)
-def f_std(Mw, 
+def f_sigma(Mw, 
          R_rup, 
          vs30, vs30_flag, 
          region, SA1180):
@@ -247,23 +244,25 @@ def ASK14(scn: gm_scenario):
     SOF, HW_flag, region = scn.SOF, scn.HW_flag, scn.region
 
     # Calculate SA1180 ground motions
-    lnSA1180 = f_lnSA(Mw, width, dip, 
-                      R_jb, R_rup, R_x, R_y0,
+    lnSA1180 = f_lnSA(scn.Mw, scn.width, scn.dip, 
+                      scn.R_jb, scn.R_rup, scn.R_x, scn.R_y0,
                       1180,
-                      -1., z_tor, 
-                      0., SOF, HW_flag, region)
+                      -1., scn.z_tor, 
+                      0., scn.SOF, scn.HW_flag, scn.region)
     
     # Convert from log
     SA1180 = jnp.exp(lnSA1180)
 
     # Plug back into lnSA and std
-    lnSA = f_lnSA(Mw, width, dip, 
-                  R_jb, R_rup, R_x, R_y0, 
-                  vs30, 
-                  z1p0, z_tor, 
-                  SA1180, SOF, HW_flag, region)
+    lnSA = f_lnSA(scn.Mw, scn.width, scn.dip, 
+                  scn.R_jb, scn.R_rup, scn.R_x, scn.R_y0, 
+                  scn.vs30, 
+                  scn.z1p0, scn.z_tor, 
+                  SA1180, scn.SOF, scn.HW_flag, scn.region)
     
-    std = f_std(Mw, R_rup, vs30, vs30_flag, region, SA1180)
+    sigma = f_sigma(scn.Mw, scn.R_rup, 
+                    scn.vs30, scn.vs30_flag, 
+                    scn.region, SA1180)
 
     # We made it.
-    return T, lnSA, std
+    return T, lnSA, sigma
