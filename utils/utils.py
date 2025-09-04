@@ -17,7 +17,7 @@ def uv_normal(mu:float, std:float, x:jax.Array) -> jax.Array:
 def uv_bump(x, a:float = 1, b:float= 1, c:float = 10):
     """ Bump function normalized to 1-max. 
     x is input. 
-    a, b, c, d for amplitude, width, shape, and displacement, respectively."""
+    a, b, c, d for amplitude, width, shape."""
     b, c = [jnp.clip(p, min = 1E-2) for p in [b, c]]
     f = a * jnp.exp(c ** (-2) + (b ** 2) / (c ** 2 * (((x) ** 2) - b ** 2)))
     cond = jnp.any(jnp.stack([x < -b, 
@@ -52,9 +52,9 @@ def uv_H(k:int, mu:float, std:float, x:jax.Array) -> jax.Array:
 
 # multivariate hermite family
 def mv_H(k:int, mu:jax.Array, std:jax.Array, x:jax.Array) -> jax.Array:
-    """mu and std are m-dimensional arrays. x is (n, m). n specifies the maximum
-     order of the Legendre polynomial. Returns all multivariate Hermite polynomials defined
-     over the specified multivariate Gaussian--that is, all possible products of order <= k."""
+    """mu and std are m-dimensional arrays. x is array of shape (n, m). Returns all multivariate 
+    Hermite polynomials defined over the specified multivariate Gaussian--that is, 
+    all possible products of Hermite polynomials with order <= k."""
     m = mu.shape[0]
     assert std.shape[0] == m and x.shape[-1] == m, "Dimensions incompatible..."
     assert len(x.shape) == 2, "X must be an  array."
@@ -66,7 +66,7 @@ def mv_H(k:int, mu:jax.Array, std:jax.Array, x:jax.Array) -> jax.Array:
     #   In this case underscore = subscript.
     j = jnp.stack(jnp.meshgrid(*[jnp.arange(k + 1)] * m), axis = 0).reshape(m, (k + 1) ** m)
     # Produce all hermite polynomials <= n for all variables (dimensions of x, m)
-    y_tens = jax.vmap(Partial(H, k))(mu, std, x.T).transpose(0, 2, 1)
+    y_tens = jax.vmap(Partial(uv_H, k))(mu, std, x.T).transpose(0, 2, 1)
     # Take groupwise products
     y = jnp.prod(y_tens[i, j], axis = 0)
     return y
@@ -98,8 +98,3 @@ def fixed_GLq(f:Callable, D:jax.Array, k:int):
     
     # Final scaling and dot between y and W
     return jnp.prod(scale) * (f(X) @ W)
-
-# Sobol sequence! 
-def sobol(d, pn):
-    """d-dimensional Sobol sequence of 2^pn points."""
-    

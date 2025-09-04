@@ -1,6 +1,5 @@
 import jax
 from jax import lax
-from jax.tree_util import Partial
 from jax import numpy as jnp
 
 import polars as pl
