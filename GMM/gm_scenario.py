@@ -1,10 +1,11 @@
 # Stolen from USGS github
+import jax
 from jax import numpy as jnp
 
 # Convert rake to SOF and vice versa
-def SOF_from_rake(rake:float):
+def SOF_from_rake(rake):
         # -1 for reverse, 0 for SS, 1 for normal
-        return jnp.sin(jnp.deg2rad(rake)).round()
+        return jnp.sin(jnp.deg2rad(rake)).round().astype(int)
 
 class gm_scenario:
         def __init__(self, Mw, dip, rake, width, 
@@ -39,9 +40,17 @@ class gm_scenario:
                 self.R_y0 = jnp.array(R_y0)
                 self.region = jnp.array(region)
 
+        def __setattr__(self, name, value):
+                if not isinstance(value, jax.Array):
+                        value = jnp.array(value, dtype = float)
+                super().__setattr__(name, value)
+
 def gm_default():
         return gm_scenario(6.8, 75, 30, 3, 
                            2.5, 2.5, 2.5, 
                            760, False,
-                           -1, -1, 0.5, 0,
+                           -1., -1., 0.5, 0,
                            0, 0, 0)
+
+def gm_random():
+        pass

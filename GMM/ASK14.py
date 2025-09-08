@@ -4,46 +4,49 @@ from jax.tree_util import Partial
 from jax import numpy as jnp
 
 import polars as pl
-import re
 
 from gm_scenario import *
 
+from matplotlib import pyplot as plt
+
 ##### GROUND MOTION COEFFICIENTS #####
 gmc = pl.read_csv('ASK14_coeffs.csv')
+gmc[-2, 'T'] = -1.
+gmc[-1, 'T'] = -2.
 gmc_col = gmc.columns
-gmc = gmc.to_jax()
+gmc = gmc.cast(pl.Float64).to_jax().T
 
 # First few
-T, v_lin, b, n, c = gmc[:, :5].T
-c4 = gmc[:, 5]
-M = gmc[:, 6:8].T
-M_empty = jnp.zeros((1, M.shape[-1]))
-M = jnp.insert(M, 0, M_empty, axis = 0)
+T, v_lin, b, n, M1, c, c4 = gmc[:7]
+M = jnp.empty((3, T.shape[0]))
+M = M.at[1].set(M1)
+M = M.at[2].set(5.0)
+# Update M with constant for M2 and 0-row for M0
+empty = jnp.zeros_like(T)
 
-# Lots of a_ns, so we'll make an array for them.
-#   Start with the actual columns.
-a_sparse = gmc[:, 8:38].T
-# Strip indices from column titles. (One is a capital letter but we're making
-#   it lowercase).
-a_idcs = jnp.array([int(re.findall('a' + r'\d+', a_col.lower())[0][1:]) for a_col in gmc_col[8:38]])
-# Make empty array
-a_empty = jnp.zeros((47, a_sparse.shape[-1]))
-# Save values.
-# INDICES MATCH COEFFICIENT NAMES IN THE PAPER. FIRST ROW WILL BE EMPTY.
-a = a_empty.at[a_idcs].set(a_sparse)
-empty = a[0]
+# Get a. But they're all out of order...
+a = gmc[7:38]
+a_idcs = jnp.array([int(ai[1:]) for ai in gmc_col[7:38]])
+a = a[jnp.argsort(a_idcs)]
+a_missing = jnp.arange(a_idcs.max())
+a_missing = a_missing[~jnp.isin(a_missing, a_idcs)]
+# Update indices to account for insertions
+a_missing = a_missing - jnp.arange(a_missing.shape[0])
+a = jnp.insert(a, a_missing, empty, axis = 0)
 
-# Same thing for s_n, but it's easier.
-# AGAIN, INDICES MATCH COEFFICIENT NAMES IN THE PAPER. FIRST ROW WILL BE EMPTY.
-s_est = gmc[:, 38:40].T
+# Grab s
+s_est = gmc[38:40]
 s_est = jnp.insert(s_est, 0, empty, axis = 0)
-s = gmc[:, 40:].T
-s_n = jnp.insert(s, 0, empty, axis = 0)
+s = gmc[40:]
+s = jnp.insert(s, 0, empty, axis = 0)
 
 # Also defining v1 so we don't need to do it twice
 v1 = jnp.exp(-0.35 * jnp.log(T / 0.5) + jnp.log(1500))
 v1 = v1.at[T <= 0.5].set(1500)
 v1 = v1.at[T >= 3].set(800)
+
+# Works with for loop
+# Doesn't work with vector index
 
 #### MAIN MODEL ####
 # Base model (section 4.1)
@@ -79,15 +82,14 @@ def f7_8(Mw, SOF):
 # Site response (4.3)
 def f5(SA_rock, vs30):
     # Straightforward
-    vs30_arr = jnp.full_like(v1, vs30)
-    vs30_star = jnp.clip(vs30_arr, max = v1)
+    vs30_star = jnp.clip(vs30, max = v1)
 
     site = (a[10] + b * n) * jnp.log(vs30_star / v_lin)
     site2 = site - \
             b * jnp.log(SA_rock + c) + \
             b * jnp.log(SA_rock + c * (vs30_star / v_lin) ** n)
     
-    return lax.select(v_lin >= vs30, site2, site)
+    return site#lax.select(vs30 < v_lin, site, site2)
 
 # Hanging wall (4.4)
     # Only calculate if HW_flag is 1
@@ -146,8 +148,7 @@ def regional(R_rup,
     # Taiwan:
     def f_TW():
         # vs30* scaling
-        vs30_arr = jnp.full_like(v1, vs30)
-        vs30_star = jnp.clip(vs30_arr, min = v1)
+        vs30_star = jnp.clip(vs30, min = v1)
         f12 = a[31] * jnp.log(vs30_star / v_lin)
         delta_TW = f12 + a[25] * R_rup
         return delta_TW
@@ -174,11 +175,25 @@ def regional(R_rup,
     
     return delta
 
+def f_SA1180(Mw, width, dip, 
+             R_jb, R_rup, R_x, R_y0,
+             z_tor,
+             SOF):
+    lnSA1180 = f1(Mw, R_rup) + \
+               f7_8(Mw, SOF) + \
+               (a[10] + b * n) * jnp.log(1180 / v_lin) + \
+               f4(Mw, dip, width,
+                  R_x, R_jb, R_y0, 
+                  z_tor) + \
+               f6(z_tor)
+    
+    return jnp.exp(lnSA1180)
+
 # Cumulative lnSA model
 def f_lnSA(Mw, width, dip, 
         R_jb, R_rup, R_x, R_y0, 
         vs30, 
-        z1p0, z_tor, SA_rock,
+        z1p0, z_tor, SA1180,
         SOF, HW_flag, region):
     # Zeros for if HW_flag is false (0)
     f_filler = lambda *args: empty
@@ -186,7 +201,7 @@ def f_lnSA(Mw, width, dip,
     return (
            f1(Mw, R_rup) + 
            f7_8(Mw, SOF) + 
-           f5(SA_rock, vs30) + 
+           f5(SA1180, vs30) + 
            lax.cond(HW_flag, f4, f_filler, Mw, dip, width, R_x, R_jb, R_y0, z_tor) + 
            f6(z_tor) +
            f10(vs30, z1p0, region) + 
@@ -237,21 +252,12 @@ def f_sigma(Mw,
 
 # FULL MODEL
 def ASK14(scn: gm_scenario):
-    Mw, dip, rake, width = scn.Mw, scn.dip, scn.rake, scn.width
-    R_jb, R_rup, R_x, R_y0 = scn.R_jb, scn.R_rup, scn.R_x, scn.R_y0
-    vs30, vs30_flag = scn.vs30, scn.vs30_flag
-    z1p0, z2p5, z_tor = scn.z1p0, scn.z2p5, scn.z_tor
-    SOF, HW_flag, region = scn.SOF, scn.HW_flag, scn.region
+    vs30_star = jnp.clip(scn.vs30, min = v1)
 
     # Calculate SA1180 ground motions
-    lnSA1180 = f_lnSA(scn.Mw, scn.width, scn.dip, 
+    SA1180 = f_SA1180(scn.Mw, scn.width, scn.dip,
                       scn.R_jb, scn.R_rup, scn.R_x, scn.R_y0,
-                      1180,
-                      -1., scn.z_tor, 
-                      0., scn.SOF, scn.HW_flag, scn.region)
-    
-    # Convert from log
-    SA1180 = jnp.exp(lnSA1180)
+                      scn.z_tor, scn.SOF)
 
     # Plug back into lnSA and std
     lnSA = f_lnSA(scn.Mw, scn.width, scn.dip, 

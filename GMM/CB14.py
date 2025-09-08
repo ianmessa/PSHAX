@@ -73,6 +73,7 @@ def f_hng(Mw, dip, width, R_jb, R_rup, R_x, z_tor):
 
 # Site response (eqns. 17 - 19)
 def f_site(vs30, SA1100, region): 
+    vs30_arr = jnp.full_like(T, vs30)
     s_J = int(region == 2)
     G_lo = c[11] * jnp.log(vs30 / k[1]) + k[2] * \
         (jnp.log(SA1100 + c_SA * (vs30 / k[1]) ** n) - \
@@ -80,8 +81,8 @@ def f_site(vs30, SA1100, region):
     G_hi = (c[11] + k[2] * n) * jnp.log(vs30 / k[1])
     G = lax.select(vs30 <= k[1], G_lo, G_hi)
     
-    c_J = lax.select(vs30 <= 200, c[12], c[13])
-    coeff_minus_J = lax.select(vs30 <= 200, jnp.log(200 / k[1]), empty)
+    c_J = lax.select(vs30_arr <= 200, c[12], c[13])
+    coeff_minus_J = lax.select(vs30_arr <= 200, jnp.log(200 / k[1]), empty)
     J = (c_J + k[2] * n) * (jnp.log(vs30 / k[1]) - coeff_minus_J)
     return G + s_J * J
 
