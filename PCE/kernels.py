@@ -6,14 +6,15 @@ from collections.abc import Callable
 
 from utils import uv_bump
 
-c = jnp.array([-0.1343, 0.0668, -0.4288, -0.0636, 0.0082])
+AL_c = jnp.array([-0.1343, 0.0668, -0.4288, -0.0636, 0.0082])
 
 def AL_krnl(x1x2):
     """Abrahamson/Lacour 21 kernel. Takes input of shape (2, 2) ((M1, R1), (M2, R2))."""
     assert x1x2.shape == (2, 2), "Bad shape..."
     dMw, dR = jnp.diff(x1x2, axis = 0)
     dlnR = jnp.log(jnp.abs(dR))
-    y = c[0] * dMw + c[1] * dlnR + jnp.exp(c[2 * dMw ** 2 + c[3] * dlnR + c[4] * dMw * dlnR])
+    y = AL_c[0] * dMw + AL_c[1] * dlnR + \
+        jnp.exp(AL_c[2 * dMw ** 2 + AL_c[3] * dlnR + AL_c[4] * dMw * dlnR])
     return y
 
 class nrl_krnl(nnx.Module):

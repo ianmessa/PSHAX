@@ -11,7 +11,6 @@ gmc = pl.read_csv('BSSA14_coeffs.csv')
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
 gmc_col = gmc.columns
-print(gmc_col)
 gmc = gmc.cast(pl.Float64).to_jax().T
 
 T = gmc[0]
