@@ -1,10 +1,12 @@
+# Jaxlib
 import jax
 from jax import lax
 from jax import numpy as jnp
+jax.config.update('jax_enable_x64', True)
 
 import polars as pl
 
-from gm_scenario import *
+from data.gm_utils import *
 
 gmc = pl.read_csv('Idriss14_coeffs.csv')
 gmc[-2, 'T'] = -1.
@@ -50,7 +52,7 @@ def f_lnSA(Mw, R_rup, vs30, SOF):
 def f_sigma(Mw):
     return 1.18 + 0.035 * jnp.log(T) - 0.06 * Mw
 
-def Idriss14(scn:gm_scenario): 
+def f_Idriss14(scn:gm_scenario): 
     lnSA = f_lnSA(scn.Mw, scn.R_rup, scn.vs30, scn.SOF)
     sigma = f_sigma(scn.Mw)
     return T, lnSA, sigma

@@ -4,7 +4,7 @@ from jax import numpy as jnp
 
 import polars as pl
 
-from gm_scenario import *
+from data.gm_utils import *
 
 gmc = pl.read_csv('BSSA14_coeffs.csv')
 
@@ -29,24 +29,27 @@ dPhi_R, dPhi_V = gmc[29:31]
 v1, v2, phi1, phi2, tau1, tau2 = gmc[31:]
 
 # Source model (eqn. 2)
+def f_SOF_flag(rake):
+    abs_rake = jnp.abs(rake)
+    is_SS = (~jnp.logical_and(abs_rake > 30, abs_rake < 150)).astype(int)
+    return is_SS * - jnp.sign(rake)
+
 def f_event(Mw, SOF):
     # Select last term
     e_last = lax.select(Mw <= Mh, 
                         e[4] * (Mw - Mh) + e[5] * (Mw - Mh) ** 2,
                         e[6] * (Mw - Mh))
     
-    # Build SOF condition ([-1, 0, 1] -> [0, 1, 2])
-    #   We assume it will always be known for the sake of 
-    #   compatibility with other GMPEs. 
     cond_SOF = (SOF + 1).astype(int)
-    e_SOF = lax.select_n(cond_SOF, e[3], e[1], e[2])
-    return e_SOF#e_SOF + e_last
+    e_SOF = lax.select_n(cond_SOF, e[3], e[0], e[2])
+    return e_SOF + e_last
 
 # Path model (eqns. 3, 4)
 def f_path(Mw, R_jb, region):
     R = (R_jb ** 2 + h ** 2) ** (1 / 2)
     cond = 0
-    Dc3 = lax.select_n(cond, empty, Dc3CaTw, Dc3CnTr, Dc3ItJp)
+    #Dc3 = lax.select_n(cond, Dc3CaTw, Dc3CnTr, Dc3ItJp)
+    Dc3 = Dc3CaTw
     return jnp.log(R / R_ref) * (c[1] + c[2] * (Mw - M_ref)) + (c[3] + Dc3) * (R - R_ref)
 
 # Site model (eqn. 5 - 12): 
@@ -75,7 +78,6 @@ def f_site(Mw, R_jb, vs30, z1p0, region, PGA_rock):
 
 # lnSA model
 def f_lnSA(Mw, R_jb, vs30, SOF, z1p0, region, PGA_rock): 
-
     return f_event(Mw, SOF) + \
              f_path(Mw, R_jb, region) + \
              f_site(Mw, R_jb, vs30, z1p0, region, PGA_rock)
@@ -102,13 +104,15 @@ def f_sigma(Mw, R_jb, vs30):
     return (phi ** 2 + tau ** 2) ** (1 / 2)
 
 # Put it all together.
-def BSSA14(scn:gm_scenario):
+def f_BSSA14(scn:gm_scenario):
     # -2 index is for PGA
-    PGA_rock = jnp.exp(f_event(scn.Mw, scn.SOF) + \
-                       f_path(scn.Mw, scn.R_jb, scn.region))[-2]
+    SOF_flag = f_SOF_flag(scn.rake)
+    PGA_rock = jnp.exp(f_event(scn.Mw, SOF_flag) + \
+                       f_path(scn.Mw, scn.R_jb, scn.region))
+    print(PGA_rock, PGA_rock[-2])
     lnSA = f_lnSA(scn.Mw, scn.R_jb,
                   scn.vs30, 
-                  scn.SOF, scn.z1p0, scn.region,
+                  SOF_flag, scn.z1p0, scn.region,
                   PGA_rock)
     sigma = f_sigma(scn.Mw, scn.R_jb, scn.vs30)
 

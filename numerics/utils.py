@@ -1,18 +1,14 @@
 import jax
 from jax import numpy as jnp
-from jax.experimental.jet import jet
 from jax.tree_util import Partial
+from jax.experimental.jet import jet
+jax.config.update('jax_enable_x64', True)
+
 
 from scipy.special import roots_legendre
 from collections.abc import Callable
 
-# Univariate normal distribution
-def uv_normal(mu:float, std:float, x:jax.Array) -> jax.Array:
-    """ A univariate normal distribution evaluated at x."""
-    num = jnp.exp(-(x - mu) ** 2 / (2 * std ** 2))
-    denom = (std * jnp.sqrt(2 * jnp.pi))
-    return num / denom
-
+### MISCELLANEOUS HELPERS ###
 # Univariate bump function.
 def uv_bump(x, a:float = 1, b:float= 1, c:float = 10):
     """ Bump function normalized to 1-max. 
@@ -27,7 +23,14 @@ def uv_bump(x, a:float = 1, b:float= 1, c:float = 10):
     f = jnp.where(cond, 0, f)
     return f
 
-# Univariate hermite
+### PCE HELPERS ###
+# Univariate normal distribution
+def uv_normal(mu:float, std:float, x:jax.Array) -> jax.Array:
+    """ A univariate normal distribution evaluated at x."""
+    num = jnp.exp(-(x - mu) ** 2 / (2 * std ** 2))
+    denom = (std * jnp.sqrt(2 * jnp.pi))
+    return num / denom
+
 def uv_H(k:int, mu:float, std:float, x:jax.Array) -> jax.Array:
     """ kth-order probabilist's Hermite polynomial fit to N(mu, std) and evaluated at x."""
     # Flatten x
@@ -48,7 +51,7 @@ def uv_H(k:int, mu:float, std:float, x:jax.Array) -> jax.Array:
     
     # Slam together as big l*(n + 1) array (l is number of entries, 
     #   n is hermite pol. degree (n + 1 b/c of H0))
-    return (d_normal_H * signs / normal_H(x_flat)).T
+    return (d_normal_H * signs / normal_H(x_flat))
 
 # multivariate hermite family
 def mv_H(k:int, mu:jax.Array, std:jax.Array, x:jax.Array) -> jax.Array:
@@ -66,11 +69,12 @@ def mv_H(k:int, mu:jax.Array, std:jax.Array, x:jax.Array) -> jax.Array:
     #   In this case underscore = subscript.
     j = jnp.stack(jnp.meshgrid(*[jnp.arange(k + 1)] * m), axis = 0).reshape(m, (k + 1) ** m)
     # Produce all hermite polynomials <= n for all variables (dimensions of x, m)
-    y_tens = jax.vmap(Partial(uv_H, k))(mu, std, x.T).transpose(0, 2, 1)
+    y_tens = jax.vmap(Partial(uv_H, k))(mu, std, x.T)
     # Take groupwise products
     y = jnp.prod(y_tens[i, j], axis = 0)
     return y
 
+### QUADRATURE ###
 # Legendre roots + weights (REPLACE...).
 def L_rw(k:int):
     """ All roots + weights for kth-order Legendre polynomial."""
@@ -79,7 +83,7 @@ def L_rw(k:int):
 
 # Fixed-order m-dimensional Gauss-Legendre Quadrature
 def fixed_GLq(f:Callable, D:jax.Array, k:int):
-    """Fixex-order m-dimensional Gauss-Legendre Quadrature.
+    """Fixed-order m-dimensional Gauss-Legendre Quadrature.
     If D is an mx2 array, f takes an (m,)-shaped vector of arguments.
     We evaluate it at the cartesian product of the roots of m scaled
     nth-order Legendre polynomials. """

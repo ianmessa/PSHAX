@@ -4,7 +4,7 @@ from jax import numpy as jnp
 
 import polars as pl
 
-from gm_scenario import *
+from data.gm_utils import *
 
 gmc = pl.read_csv('CB14_coeffs.csv')
 gmc[-2, 'T'] = -1.
@@ -172,7 +172,7 @@ def f_sigma(Mw, vs30, SA1100):
 
     return sigma
 
-def CB14(scn: gm_scenario):
+def f_CB14(scn: gm_scenario):
     # SA1100
     lnSA1100 = f_lnSA(scn.Mw, scn.dip, scn.width,
                       scn.R_jb, scn.R_rup, scn.R_x,

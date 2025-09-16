@@ -4,7 +4,7 @@ from flax import nnx
 
 from collections.abc import Callable
 
-from utils import uv_bump
+from processing import uv_bump
 
 AL_c = jnp.array([-0.1343, 0.0668, -0.4288, -0.0636, 0.0082])
 
@@ -18,9 +18,9 @@ def AL_krnl(x1x2):
     return y
 
 class nrl_krnl(nnx.Module):
-    """A neural kernel with stationarity option. Input is of shape (2, in_dim), where
+    """A neural kernel with optional stationarity. Input is of shape (2, in_dim), where
     the first axis is (x1, x2). If stationary, runs L2 norm of x1 & x2 through feedforwards and
-    takes absolute value. Otherwise, runs x1 & x2 through feedforwards and takes product of absolute values.
+    takes absolute value. Otherwise, runs x1 & x2 through the same forward and takes product of absolute values afterward.
     At the end, we multiply the output by a tunable bump function along the L2 norm to make the kernel compactly supported.
     For high c-values, the bump function practically becomes a step function, but it's still smooth."""
     def __init__(self, in_dim:int, 
@@ -44,7 +44,7 @@ class nrl_krnl(nnx.Module):
         self.out_ffn = nnx.Linear(hidden_dim, 1, rngs = rngs)
 
     def __call__(self, x1x2):
-        """Pass x1 and x2 through kernel of shape (2, in_dim)."""
+        """Pass x1/x2 of shape (2, in_dim) through kernel."""
         # Define x with bool. We can still jit this because the "if" is dependent on 
         #   a class variable.
         x_norm = jnp.linalg.norm(jnp.diff(x1x2, axis = 0), axis = 1)
