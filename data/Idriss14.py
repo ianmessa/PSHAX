@@ -6,11 +6,10 @@ jax.config.update('jax_enable_x64', True)
 
 import polars as pl
 
-from data.gm_utils import *
+from gm_utils import *
 
 gmc = pl.read_csv('Idriss14_coeffs.csv')
-gmc[-2, 'T'] = -1.
-gmc[-1, 'T'] = -2.
+gmc[-1, 'T'] = -1.
 gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 
@@ -36,23 +35,22 @@ b = b.at[1:, 1].set(gmc[7:9])
 # Other coeffs
 xi, gamma, phi = gmc[-3:]
 
-def f_lnSA(Mw, R_rup, vs30, SOF):
+def f_lnSA(Mw, R_rup, vs30, RV_flag):
     # Select coeffs based on magnitude
     a_sel = lax.select(Mw >= 6.75, a[:, 1], a[:, 0])
     b_sel = lax.select(Mw >= 6.75, b[:, 1], b[:, 0])
-    # Convert SOF to flag
-    SOF_flag = SOF < 0
     # Done
     return a_sel[1] + \
            a_sel[2] * Mw + \
            a_sel[3] * (8.5 - Mw) ** 2 - \
            (b_sel[1] + b_sel[2] * Mw) * jnp.log(R_rup + 10) + \
-           xi * jnp.log(vs30) + gamma * R_rup + phi * SOF_flag
+           xi * jnp.log(vs30) + gamma * R_rup + phi * RV_flag
 
 def f_sigma(Mw):
     return 1.18 + 0.035 * jnp.log(T) - 0.06 * Mw
 
 def f_Idriss14(scn:gm_scenario): 
-    lnSA = f_lnSA(scn.Mw, scn.R_rup, scn.vs30, scn.SOF)
+    RV_flag = scn.SOF_flag < 0
+    lnSA = f_lnSA(scn.Mw, scn.R_rup, scn.vs30, RV_flag)
     sigma = f_sigma(scn.Mw)
     return T, lnSA, sigma

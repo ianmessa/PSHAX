@@ -32,7 +32,8 @@ def uv_normal(mu:float, std:float, x:jax.Array) -> jax.Array:
     return num / denom
 
 def uv_H(k:int, mu:float, std:float, x:jax.Array) -> jax.Array:
-    """ kth-order probabilist's Hermite polynomial fit to N(mu, std) and evaluated at x."""
+    """With x of shape n, returns (k, n) array of Hermite polynomials
+    from orders 1 to k."""
     # Flatten x
     x_flat = x.squeeze()
     # Get primals (derivatives of f(x) = x)
@@ -43,14 +44,11 @@ def uv_H(k:int, mu:float, std:float, x:jax.Array) -> jax.Array:
     normal_H = Partial(uv_normal, mu, std)
     # Get nth derivatives using jax jet
     y, dy = jet(normal_H, (x_flat,), (x_ser,))
-    dy = jnp.array(dy)
-    # Add primal for H0
-    d_normal_H = jnp.insert(dy, 0, y, axis = 0)
+    d_normal_H = jnp.array(dy)
     # Take signs for each one
-    signs = (-1) ** jnp.arange(0, k + 1)[:, None]
+    signs = (-1) ** jnp.arange(0, k)[:, None]
     
-    # Slam together as big l*(n + 1) array (l is number of entries, 
-    #   n is hermite pol. degree (n + 1 b/c of H0))
+    # Slam together as big (n, k) array
     return (d_normal_H * signs / normal_H(x_flat))
 
 # multivariate hermite family

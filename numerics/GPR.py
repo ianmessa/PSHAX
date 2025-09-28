@@ -4,20 +4,20 @@ from flax import nnx
 
 from collections.abc import Callable
 
-from processing import uv_bump
+from .utils import uv_bump
 
 AL_c = jnp.array([-0.1343, 0.0668, -0.4288, -0.0636, 0.0082])
 
-def AL_krnl(x1x2):
+def krnl_AL(x1x2):
     """Abrahamson/Lacour 21 kernel. Takes input of shape (2, 2) ((M1, R1), (M2, R2))."""
     assert x1x2.shape == (2, 2), "Bad shape..."
     dMw, dR = jnp.diff(x1x2, axis = 0)
     dlnR = jnp.log(jnp.abs(dR))
     y = AL_c[0] * dMw + AL_c[1] * dlnR + \
-        jnp.exp(AL_c[2 * dMw ** 2 + AL_c[3] * dlnR + AL_c[4] * dMw * dlnR])
+        jnp.exp(AL_c[2] * dMw ** 2 + AL_c[3] * dlnR + AL_c[4] * dMw * dlnR)
     return y
 
-class nrl_krnl(nnx.Module):
+class krnl_nrl(nnx.Module):
     """A neural kernel with optional stationarity. Input is of shape (2, in_dim), where
     the first axis is (x1, x2). If stationary, runs L2 norm of x1 & x2 through feedforwards and
     takes absolute value. Otherwise, runs x1 & x2 through the same forward and takes product of absolute values afterward.
