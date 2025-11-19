@@ -2,18 +2,19 @@
 import jax
 from jax import lax
 from jax import numpy as jnp
-jax.config.update('jax_enable_x64', True)
 
 import polars as pl
+from importlib.resources import files
 
-from gm_utils import *
+from .gm_utils import *
 
-gmc = pl.read_csv('Idriss14_coeffs.csv')
+gmc = pl.read_csv(files("seismic") / "Idriss14_coeffs.csv")
 gmc[-1, 'T'] = -1.
 gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 
 T = gmc[0]
+T_sort = jnp.argsort(T)
 empty = jnp.zeros_like(T, dtype = float)
 
 # a
@@ -37,8 +38,8 @@ xi, gamma, phi = gmc[-3:]
 
 def f_lnSA(Mw, R_rup, vs30, RV_flag):
     # Select coeffs based on magnitude
-    a_sel = lax.select(Mw >= 6.75, a[:, 1], a[:, 0])
-    b_sel = lax.select(Mw >= 6.75, b[:, 1], b[:, 0])
+    a_sel = jnp.where(Mw >= 6.75, a[:, 1], a[:, 0])
+    b_sel = jnp.where(Mw >= 6.75, b[:, 1], b[:, 0])
     # Done
     return a_sel[1] + \
            a_sel[2] * Mw + \
@@ -49,8 +50,12 @@ def f_lnSA(Mw, R_rup, vs30, RV_flag):
 def f_sigma(Mw):
     return 1.18 + 0.035 * jnp.log(T) - 0.06 * Mw
 
-def f_Idriss14(scn:gm_scenario): 
-    RV_flag = scn.SOF_flag < 0
-    lnSA = f_lnSA(scn.Mw, scn.R_rup, scn.vs30, RV_flag)
-    sigma = f_sigma(scn.Mw)
-    return T, lnSA, sigma
+def f_Idriss14(Mw:float, site:Site, fault:Fault): 
+    SOF_flag = fault.calc_SOF_flag()
+    RV_flag = SOF_flag < 0
+    R_rup = calc_R_rup(site, fault)
+    lnSA = f_lnSA(Mw, R_rup, site.vs30, RV_flag)
+    std = f_sigma(Mw)
+    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
+    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    return lnSA, std

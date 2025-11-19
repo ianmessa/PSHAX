@@ -3,16 +3,18 @@ from jax import lax
 from jax import numpy as jnp
 
 import polars as pl
+from importlib.resources import files
 
-from gm_utils import *
+from .gm_utils import *
 
-gmc = pl.read_csv('CB14_coeffs.csv')
+gmc = pl.read_csv(files("seismic") / "CB14_coeffs.csv")
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
 gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 
 T = gmc[0]
+T_sort = jnp.argsort(T)
 empty = jnp.zeros_like(T, dtype = float)
 c = gmc[1:22]
 # Region 0 (all others)/1/2/3
@@ -39,7 +41,8 @@ def f_geom(Mw, R_rup):
     return (c[5] + c[6] * Mw) * jnp.log((R_rup ** 2 + c[7] ** 2) ** (1 / 2))
 
 def f_SOF(Mw, SOF_flag):
-    c_SOF = lax.select_n(SOF_flag + 1, c[8], empty, c[9])
+    SOF_idx = (SOF_flag + 1).astype(jnp.int32)
+    c_SOF = lax.select_n(SOF_idx, c[8], empty, c[9])
     return c_SOF * jnp.clip(Mw - 4.5, min = 0, max = 1)
 
 def f_HW(Mw, dip, width, R_jb, R_rup, R_x, z_tor):
@@ -65,7 +68,8 @@ def f_site(vs30, pga_rock):
     return site_G
 
 def f_sed(z2p5):
-    z2p5_cond = int(z2p5 < 1) + int(z2p5 < 3)
+    z2p5_arr = empty + z2p5
+    z2p5_cond = (z2p5_arr < 1).astype(int) + (z2p5_arr < 3).astype(int)
     z2p5_less = c[14] * (z2p5 - 1)
     z2p5_gr = c[16] * k[3] * jnp.exp(-0.75) * (1 - jnp.exp(-0.25 * (z2p5 - 3)))
     return lax.select_n(z2p5_cond, z2p5_less, empty, z2p5_gr)
@@ -81,29 +85,28 @@ def f_dip(Mw, dip):
 def f_attn(R_rup):
     return (c[20] * Dc20_CA) * jnp.clip(R_rup - 80, min = 0)
 
-def f_lnSA(scn:gm_scenario):
-    other_terms = f_mag(scn.Mw) + \
-                f_geom(scn.Mw, scn.R_rup) + \
-                f_SOF(scn.Mw, scn.SOF_flag) + \
-                f_HW(scn.Mw, scn.dip, scn.width,
-                        scn.R_jb, scn.R_rup, scn.R_x,
-                        scn.z_tor) + \
-                f_hyp(scn.Mw, scn.z_hyp) + \
-                f_dip(scn.Mw, scn.dip) + \
-                f_attn(scn.R_rup)
+def f_lnSA(Mw, width, dip, z_hyp, z_tor, SOF_flag,
+                vs30, z2p5, R_jb, R_rup, R_x):
+    other_terms = f_mag(Mw) + \
+                f_geom(Mw, R_rup) + \
+                f_SOF(Mw, SOF_flag) + \
+                f_HW(Mw, dip, width,
+                        R_jb, R_rup, R_x,
+                        z_tor) + \
+                f_hyp(Mw, z_hyp) + \
+                f_dip(Mw, dip) + \
+                f_attn(R_rup)
     site_sed_rock = f_site(1100, 0) + f_sed(0.398)
     pga_rock = jnp.exp(other_terms + site_sed_rock)
 
-    site_sed_else = f_site(scn.vs30, pga_rock) + f_sed(scn.z2p5)
+    site_sed_else = f_site(vs30, pga_rock) + f_sed(z2p5)
     return other_terms + site_sed_else, pga_rock
 
-def f_sig(scn:gm_scenario, pga_rock):
-    print(scn)
-    print(scn.dip)
-    tau_lny = tau2 + (tau1 - tau2) * jnp.clip(5.5 - scn.Mw, min = 0, max = 1)
-    phi_lny = phi2 + (phi1 - phi2) * jnp.clip(5.5 - scn.Mw, min = 0, max = 1)
+def f_sig(Mw, vs30, pga_rock):
+    tau_lny = tau2 + (tau1 - tau2) * jnp.clip(5.5 - Mw, min = 0, max = 1)
+    phi_lny = phi2 + (phi1 - phi2) * jnp.clip(5.5 - Mw, min = 0, max = 1)
 
-    alpha = k[2] * pga_rock * (1 / (pga_rock + C * (scn.vs30 / k[1]) ** n) - \
+    alpha = k[2] * pga_rock * (1 / (pga_rock + C * (vs30 / k[1]) ** n) - \
                                     1 / (pga_rock + C))
     alpha = jnp.clip(alpha, min = 0)
 
@@ -114,6 +117,15 @@ def f_sig(scn:gm_scenario, pga_rock):
     phi = (phi_lnyB ** 2 + phi_lnAF ** 2 + alpha ** 2 * phi_lnPGAB ** 2 + 2 * alpha * rho * phi_lnyB * phi_lnPGAB)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_CB14(scn:gm_scenario):
-    lnSA, pga_rock = f_lnSA(scn)
-    return T, lnSA, f_sig(scn, pga_rock)
+def f_CB14(Mw:float, site:Site, fault:Fault):
+    R_jb = calc_R_jb(site, fault)
+    R_rup = calc_R_rup(site, fault)
+    R_x = calc_R_x(site, fault)
+    SOF_flag = fault.calc_SOF_flag()
+    lnSA, pga_rock = f_lnSA(Mw, fault.width, fault.dip, fault.z_hyp, fault.z_tor, SOF_flag,
+                            site.vs30, site.z2p5, 
+                            R_jb, R_rup, R_x)
+    std = f_sig(Mw, site.vs30, pga_rock)
+    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
+    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    return lnSA, std

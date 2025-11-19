@@ -1,13 +1,13 @@
 import jax
 from jax import lax
 from jax import numpy as jnp
-jax.config.update('jax_enable_x64', True)
 
 import polars as pl
+from importlib.resources import files
 
-from gm_utils import *
+from .gm_utils import *
 
-gmc = pl.read_csv('BSSA14_coeffs.csv')
+gmc = pl.read_csv(files("seismic") / "BSSA14_coeffs.csv")
 
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
@@ -15,6 +15,7 @@ gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 
 T = gmc[0]
+T_sort = jnp.argsort(T)
 empty = jnp.zeros_like(T, dtype = float)
 e = gmc[1:8]
 Mh = gmc[8]
@@ -33,7 +34,8 @@ B4 = 1360 ** 4
 
 # Source term
 def f_source(Mw, SOF_flag):
-    e_SOF = lax.select_n(SOF_flag + 1, e[3], e[1], e[2])
+    SOF_idx = (SOF_flag + 1).astype(jnp.int32)
+    e_SOF = lax.select_n(SOF_idx, e[3], e[1], e[2])
     MwMh = Mw - Mh
     e_addn = lax.select(Mw <= Mh, e[4] * MwMh + e[5] * MwMh ** 2, e[6] * MwMh)
     return e_SOF + e_addn
@@ -55,37 +57,46 @@ def f_site(vs30, z1p0, PGA_rock):
     F_dz1 = F[6] * dz1
     # Cap at F7
     filter1 = dz1 > (F[7] / F[6])
-    F_dz1 = F_dz1.at[filter1].set(F[7, filter1])
+    F_dz1 = lax.select(filter1, F[7], F_dz1)
     # Turn low periods to zero
     filter2 = T < 0.65
-    F_dz1 = F_dz1.at[filter2].set(0.)
+    F_dz1 = lax.select(filter2, empty, F_dz1)
 
     return ln_Flin + ln_Fnl + F_dz1
 
-def f_lnSA(scn:gm_scenario):
-    R = (scn.R_jb ** 2 + h ** 2) ** (1 / 2)
+def f_lnSA(Mw, SOF_flag, 
+           vs30, z1p0, 
+           R_jb):
+    R = (R_jb ** 2 + h ** 2) ** (1 / 2)
     # Add index to select PGA?...
-    PGA_rock = jnp.exp(f_source(scn.Mw, scn.SOF_flag) + f_path(scn.Mw, R))
+    PGA_rock = jnp.exp(f_source(Mw, SOF_flag) + f_path(Mw, R))
     
-    return f_source(scn.Mw, scn.SOF_flag) + \
-           f_path(scn.Mw, R) + \
-           f_site(scn.vs30, scn.z1p0, PGA_rock)
+    return f_source(Mw, SOF_flag) + \
+           f_path(Mw, R) + \
+           f_site(vs30, z1p0, PGA_rock)
 
-def f_sigma(scn:gm_scenario):
-    tau = jnp.clip(tau1 + (tau2 - tau1) * (scn.Mw - 4.5), 
+def f_sigma(Mw, vs30, R_jb):
+    tau = jnp.clip(tau1 + (tau2 - tau1) * (Mw - 4.5), 
                    min = tau1, max = tau2)
-    phi = jnp.clip(phi1 + (phi2 - phi1) * (scn.Mw - 4.5), 
+    phi = jnp.clip(phi1 + (phi2 - phi1) * (Mw - 4.5), 
                    min = phi1, max = phi2)
 
-    filter_R = scn.R_jb > R1
-    coeff_R = jnp.clip((jnp.log(scn.R_jb / R1) - jnp.log(R2 / R1)), max = 1)
-    phi = phi.at[filter_R].set((phi + dPhi_R * coeff_R)[filter_R])
+    filter_R = R_jb > R1
+    coeff_R = jnp.clip((jnp.log(R_jb / R1) - jnp.log(R2 / R1)), max = 1)
+    phi_R_mod = phi + dPhi_R * coeff_R
+    phi = lax.select(filter_R, phi_R_mod, phi)
 
-    filter_v = scn.vs30 < v2
-    coeff_v = jnp.clip(jnp.log(v2 / scn.vs30) / jnp.log(v2 / v1), max = 1)
-    phi = phi.at[filter_v].set((phi + dPhi_v * coeff_v)[filter_v])
-
+    filter_v = vs30 < v2
+    coeff_v = jnp.clip(jnp.log(v2 / vs30) / jnp.log(v2 / v1), max = 1)
+    phi_v_mod = phi + dPhi_v + coeff_v
+    phi = lax.select(filter_v, phi_v_mod, phi)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_BSSA14(scn:gm_scenario):
-    return T, f_lnSA(scn), f_sigma(scn)
+def f_BSSA14(Mw:float, site:Site, fault:Fault):
+    R_jb = calc_R_jb(site, fault)
+    SOF_flag = fault.calc_SOF_flag()
+    lnSA = f_lnSA(Mw, SOF_flag, site.vs30, site.z1p0, R_jb)
+    std = f_sigma(Mw, site.vs30, R_jb)
+    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
+    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    return lnSA, std

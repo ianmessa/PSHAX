@@ -4,14 +4,14 @@ from flax import nnx
 
 from collections.abc import Callable
 
-from .utils import uv_bump
+from numerics.misc import uv_bump
 
 AL_c = jnp.array([-0.1343, 0.0668, -0.4288, -0.0636, 0.0082])
 
-def krnl_AL(x1x2):
-    """Abrahamson/Lacour 21 kernel. Takes input of shape (2, 2) ((M1, R1), (M2, R2))."""
-    assert x1x2.shape == (2, 2), "Bad shape..."
-    dMw, dR = jnp.diff(x1x2, axis = 0)
+def krnl_AL(x1, x2):
+    """Rewrite this."""
+    assert x1.shape == x2.shape
+    dMw, dR = x1 - x2
     dlnR = jnp.log(jnp.abs(dR))
     y = AL_c[0] * dMw + AL_c[1] * dlnR + \
         jnp.exp(AL_c[2] * dMw ** 2 + AL_c[3] * dlnR + AL_c[4] * dMw * dlnR)
@@ -43,15 +43,15 @@ class krnl_nrl(nnx.Module):
         self.h_ffns = [nnx.Linear(hidden_dim, hidden_dim, rngs = rngs) for i in range(hidden_num)]
         self.out_ffn = nnx.Linear(hidden_dim, 1, rngs = rngs)
 
-    def __call__(self, x1x2):
+    def __call__(self, x1, x2):
         """Pass x1/x2 of shape (2, in_dim) through kernel."""
         # Define x with bool. We can still jit this because the "if" is dependent on 
         #   a class variable.
-        x_norm = jnp.linalg.norm(jnp.diff(x1x2, axis = 0), axis = 1)
+        x_norm = jnp.linalg.norm(x1 - x2)
         if self.stationary:
             x_in = x_norm
         else:
-            x_in = x1x2
+            x_in = jnp.stack([x1, x2], axis = 0)
         # Run both through feedforwards
         x_in = self.activation(self.in_ffn(x_in))
         for h_ffn in self.h_ffns:

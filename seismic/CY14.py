@@ -4,15 +4,17 @@ from jax import numpy as jnp
 from jax import random as jrnd
 
 import polars as pl 
+from importlib.resources import files
 
-from gm_utils import gm_scenario
+from .gm_utils import *
 
-gmc = pl.read_csv('CY14_coeffs.csv')
+gmc = pl.read_csv(files("seismic") / "CY14_coeffs.csv")
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
 gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 T = gmc[0]
+T_sort = jnp.argsort(T)
 empty = jnp.zeros_like(T)
 
 c_RB = gmc[4]
@@ -75,21 +77,41 @@ def f_soil_nl(vs30):
     exp2 = jnp.exp(phi[3] * (1130 - 360))
     return phi[2] * (exp1 - exp2)
 
-def f_lnSA(scn:gm_scenario):
-    soil_lin = phi[1] * jnp.clip(jnp.log(scn.vs30 / 1130), max = 0)
-    soil_nl = f_soil_nl(scn.vs30)
-    SA_ref = f_SA_ref(scn.Mw, scn.dip,
-                      scn.R_jb, scn.R_rup, scn.R_x,
-                      scn.z_tor, scn.SOF_flag)
+def f_lnSA(Mw, dip, z_tor, SOF_flag, 
+           vs30, z1p0,
+           R_jb, R_rup, R_x):
+    soil_lin = phi[1] * jnp.clip(jnp.log(vs30 / 1130), max = 0)
+    soil_nl = f_soil_nl(vs30)
+    SA_ref = f_SA_ref(Mw, dip,
+                      R_jb, R_rup, R_x,
+                      z_tor, SOF_flag)
     soil_nl_mod = soil_nl * jnp.log((SA_ref + phi[4]) / phi[4])
-    z1_ref = jnp.exp(-7.15 / 4 * jnp.log((scn.vs30 ** 4 + A) / B))
-    dz1 = (scn.z1p0 * 1000) - z1_ref
+    z1_ref = jnp.exp(-7.15 / 4 * jnp.log((vs30 ** 4 + A) / B))
+    dz1 = (z1p0 * 1000) - z1_ref
     rk_depth = phi[5] * (1 - jnp.exp(- dz1 / phi[6]))
 
-    return jnp.log(SA_ref) + soil_lin + soil_nl_mod + rk_depth
+    lnSA = jnp.log(SA_ref) + soil_lin + soil_nl_mod + rk_depth
+    return lnSA, soil_nl, SA_ref
 
-def f_sigma(scn:gm_scenario):
-    return 0
+def f_sigma(Mw, vs30inf_flag, soil_nl, SA_ref):
+    nl0 = soil_nl * SA_ref / (SA_ref + phi[4])
+    nl0sq = (1 + nl0) ** 2
+    Mw_test = jnp.clip(Mw - 5., min = 0, max = 1.5)
+    tau_test = tau[1] + (tau[2] - tau[1]) / 1.5 * Mw_test
 
-def f_CY14(scn:gm_scenario):
-    return T, f_lnSA(scn), f_sigma(scn)
+    vs30inf = lax.select(vs30inf_flag == 1., sigma[3], jnp.full_like(T, 0.7))
+    sig_nl0 = sigma[1] + (sigma[2] - sigma[1]) / 1.5 * Mw_test
+    sig_nl0 = sig_nl0 * (vs30inf + nl0sq) ** (1 / 2)
+
+    return (tau_test ** 2 * nl0sq + sig_nl0 ** 2)
+
+def f_CY14(Mw:float, site:Site, fault:Fault):
+    R_jb = calc_R_jb(site, fault)
+    R_rup = calc_R_rup(site, fault)
+    R_x = calc_R_x(site, fault)
+    SOF_flag = fault.calc_SOF_flag()
+    lnSA, soil_nl, SA_ref = f_lnSA(Mw, fault.dip, fault.z_tor, SOF_flag, site.vs30, site.z1p0, R_jb, R_rup, R_x)
+    std = f_sigma(Mw, site.vs30inf_flag, soil_nl, SA_ref)
+    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
+    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    return lnSA, std

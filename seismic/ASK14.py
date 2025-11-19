@@ -4,11 +4,12 @@ from jax.tree_util import Partial
 from jax import numpy as jnp
 
 import polars as pl
+from importlib.resources import files
 
-from gm_utils import *
+from .gm_utils import *
 
 ##### GROUND MOTION COEFFICIENTS #####
-gmc = pl.read_csv('ASK14_coeffs.csv')
+gmc = pl.read_csv(files("seismic") / "ASK14_coeffs.csv")
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
 gmc_col = gmc.columns
@@ -16,6 +17,7 @@ gmc = gmc.cast(pl.Float64).to_jax().T
 
 # First few
 T, v_lin, b, N, M1, c, c4 = gmc[:7]
+T_sort = jnp.argsort(T)
 M2 = 5.0
 # Update M with constant for M2 and 0-row for M0
 empty = jnp.zeros_like(T)
@@ -60,14 +62,14 @@ def f1(Mw, R_rup, R):
     dM_max = (8.5 - M_floor) ** 2
     dM2 = Mw - M2
     
-    A_capped = lax.select(Mw > M1, a[5], a[4])
-    dM2_coeff = lax.select(Mw < M2, a[6] * dM2, empty)
+    A_capped = jnp.where(Mw > M1, a[5], a[4])
+    dM2_coeff = jnp.where(Mw < M2, a[6] * dM2, empty)
 
     return f1_base + A_capped * dM1 + a[8] * dM_max + dM2_coeff * dM2 + jnp.log(R) * (a[2] + a[3] * dM1)
 
 def f7_8(Mw, SOF_flag):
     lnSA_SOF = a[12] * jnp.clip(Mw - 4, min = 0, max = 1)
-    return lax.select_n(SOF_flag == 1, lnSA_SOF, empty)
+    return lax.select_n(SOF_flag == 1., lnSA_SOF, empty)
 
 def f5(vs30, SA_rock):
     vs30_star = jnp.clip(vs30, max = v1)
@@ -76,7 +78,7 @@ def f5(vs30, SA_rock):
 def f4(Mw, width, dip, R_jb, R_x, z_tor):
     T1 = jnp.clip(2 - (dip / 45), min = 4 / 3)
 
-    T2 = 1 + a2_HW * (Mw - 6.5) + lax.select(Mw < 6.5, (1 - a2_HW) * (Mw - 6.5) ** 2, 0.)
+    T2 = 1 + a2_HW * (Mw - 6.5) + jnp.where(Mw < 6.5, (1 - a2_HW) * (Mw - 6.5) ** 2, 0.)
     
     r1 = width * jnp.cos(jnp.deg2rad(dip))
     r2 = 3 * r1
@@ -101,40 +103,49 @@ def f10(vs30, z1p0):
     z1p0_soil = jax.vmap(Partial(jnp.interp, vs30, vs30_bins))(a_coeff.T) * jnp.log((z1p0 + 0.1) / (z1p0_ref + 0.1))
     return z1p0_soil
 
-def f_lnSA_SA_rock(scn:gm_scenario):
-    c4_mag = jnp.clip(c4 - (c4 - 1) * (5 - scn.Mw), min = 1, max = c4)
-    R = (scn.R_rup ** 2 + c4_mag ** 2) ** (1 / 2)
+def f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
+                   vs30, z1p0,
+                   R_jb, R_rup, R_x):
+    c4_mag = jnp.clip(c4 - (c4 - 1) * (5 - Mw), min = 1, max = c4)
+    R = (R_rup ** 2 + c4_mag ** 2) ** (1 / 2)
     vs_rock_capped = jnp.clip(vs_rock, max = v1)
     lnSA5_rock = (a[10] + b * N) * jnp.log(vs_rock_capped / v_lin)
     
-    lnSA1 = f1(scn.Mw, scn.R_rup, R)
-    lnSA7_8 = f7_8(scn.Mw, scn.SOF_flag)
-    lnSA4 = f4(scn.Mw, scn.width, scn.dip, scn.R_jb, scn.R_x, scn.z_tor)
-    lnSA6 = f6(scn.z_tor)
-    lnSA10 = f10(scn.vs30, scn.z1p0)
+    lnSA1 = f1(Mw, R_rup, R)
+    lnSA7_8 = f7_8(Mw, SOF_flag)
+    lnSA4 = f4(Mw, width, dip, R_jb, R_x, z_tor)
+    lnSA6 = f6(z_tor)
+    lnSA10 = f10(vs30, z1p0)
 
     SA_rock = jnp.exp(lnSA1 + lnSA7_8 + lnSA5_rock + lnSA4 + lnSA6)
 
-    lnSA5 = f5(scn.vs30, SA_rock)
+    lnSA5 = f5(vs30, SA_rock)
 
     lnSA = lnSA1 + lnSA7_8 + lnSA5 + lnSA4 + lnSA6 + lnSA10
 
     return lnSA, SA_rock
 
-def f_sigma(scn:gm_scenario, SA_rock):
-    dAmp_p1 = f_dAmp(scn.vs30, SA_rock) + 1
-    vs30_s = lax.select(scn.vs30inf_flag, s_est, s[:3])
+def f_sigma(Mw, vs30, vs30inf_flag, SA_rock):
+    dAmp_p1 = f_dAmp(vs30, SA_rock) + 1
+    vs30_s = jnp.where(vs30inf_flag == 1., s_est, s[:3])
 
-    phi_A = jnp.clip(vs30_s[1] + ((vs30_s[2] - vs30_s[1]) / 2) * (scn.Mw - 4.0), min = s[1], max = s[2])
+    phi_A = jnp.clip(vs30_s[1] + ((vs30_s[2] - vs30_s[1]) / 2) * (Mw - 4.0), min = s[1], max = s[2])
     phi_B_sq = phi_A ** 2 - phi_amp_sq
     phi_sq = phi_B_sq * dAmp_p1 ** 2 + phi_amp_sq
 
-    tau_B = jnp.clip(s[3] + ((s[4] - s[3]) / 2) * (scn.Mw - 4.0), min = s[3], max = s[4])
+    tau_B = jnp.clip(s[3] + ((s[4] - s[3]) / 2) * (Mw - 4.0), min = s[3], max = s[4])
     tau = tau_B * dAmp_p1
 
     return (phi_sq + tau ** 2) ** (1 / 2)
 
-def f_ASK14(scn:gm_scenario):
-    lnSA, SA_rock = f_lnSA_SA_rock(scn)
-    sigma = f_sigma(scn, SA_rock)
-    return T, lnSA, sigma
+def f_ASK14(Mw:float, site:Site, fault:Fault):
+    R_jb = calc_R_jb(site, fault)
+    R_rup = calc_R_rup(site, fault)
+    R_x = calc_R_x(site, fault)
+    SOF_flag = fault.calc_SOF_flag()
+    lnSA, SA_rock = f_lnSA_SA_rock(Mw, fault.width, fault.dip, fault.z_tor, SOF_flag,
+                                   site.vs30, site.z1p0, R_jb, R_rup, R_x)
+    std = f_sigma(Mw, site.vs30, site.vs30inf_flag, SA_rock)
+    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
+    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    return lnSA, std

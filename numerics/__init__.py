@@ -1,2 +1,4 @@
-from .utils import *
-from .GPR import *
+from .integrate import *
+from .misc import *
+from .sobol import *
+from .spectral import *
