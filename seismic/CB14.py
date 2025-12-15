@@ -117,10 +117,8 @@ def f_sig(Mw, vs30, pga_rock):
     phi = (phi_lnyB ** 2 + phi_lnAF ** 2 + alpha ** 2 * phi_lnPGAB ** 2 + 2 * alpha * rho * phi_lnyB * phi_lnPGAB)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_CB14(Mw:float, site:Site, fault:Fault):
-    R_jb = calc_R_jb(site, fault)
-    R_rup = calc_R_rup(site, fault)
-    R_x = calc_R_x(site, fault)
+def f_CB14(Mw:float, site:Site, fault:Fault, R:jax.Array):
+    R_jb, R_rup, R_epi, R_hyp, R_x = R
     SOF_flag = fault.calc_SOF_flag()
     lnSA, pga_rock = f_lnSA(Mw, fault.width, fault.dip, fault.z_hyp, fault.z_tor, SOF_flag,
                             site.vs30, site.z2p5, 

@@ -69,7 +69,7 @@ def f1(Mw, R_rup, R):
 
 def f7_8(Mw, SOF_flag):
     lnSA_SOF = a[12] * jnp.clip(Mw - 4, min = 0, max = 1)
-    return lax.select_n(SOF_flag == 1., lnSA_SOF, empty)
+    return jnp.where(SOF_flag == 1., lnSA_SOF, empty)
 
 def f5(vs30, SA_rock):
     vs30_star = jnp.clip(vs30, max = v1)
@@ -138,10 +138,8 @@ def f_sigma(Mw, vs30, vs30inf_flag, SA_rock):
 
     return (phi_sq + tau ** 2) ** (1 / 2)
 
-def f_ASK14(Mw:float, site:Site, fault:Fault):
-    R_jb = calc_R_jb(site, fault)
-    R_rup = calc_R_rup(site, fault)
-    R_x = calc_R_x(site, fault)
+def f_ASK14(Mw:float, site:Site, fault:Fault, R:jax.Array):
+    R_jb, R_rup, R_epi, R_hyp, R_x = R
     SOF_flag = fault.calc_SOF_flag()
     lnSA, SA_rock = f_lnSA_SA_rock(Mw, fault.width, fault.dip, fault.z_tor, SOF_flag,
                                    site.vs30, site.z1p0, R_jb, R_rup, R_x)

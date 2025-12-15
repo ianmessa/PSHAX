@@ -278,6 +278,13 @@ def calc_R_x(site: Site, fault: Fault) -> float:
     """Calculate 2d distance between site and top of rupture."""
     fault_xyz_tor = fault.calc_xyz_hyp() + fault.calc_dxyz_tor()
     return jnp.linalg.norm(site.calc_xyz() - fault_xyz_tor, ord=2)
+
+def calc_R(site:Site, fault:Fault, metrics:list):
+    """Calculate distances of interest."""
+    metric_dict = {'jb': 0, 'rup': 1, 'epi': 2, 'hyp': 3, 'x': 4}
+    metric_idcs = [metric_dict[metric] for metric in metrics]
+    metric_calcs = [calc_R_jb, calc_R_rup, calc_R_epi, calc_R_hyp, calc_R_x]
+    return jax.vmap(lax.switch, in_axes = (0, 0, None, None))(metric_idcs, metric_calcs, site, fault)
     
 @jtu.register_pytree_node_class
 class Scenario:
@@ -327,14 +334,16 @@ class Scenario:
     
 @jtu.register_pytree_node_class
 class GMMLT:
-    def __init__(self, gmms:list, weights:jax.typing.ArrayLike):
+    def __init__(self, gmms:list, weights:jax.typing.ArrayLike, R_metrics:list = ['jb','rup','x']):
         self.gmms = gmms
         self.weights = weights
+        self.R_metrics = R_metrics
 
     def calc_all(self, Mw:float, site:Site, fault:Fault):
         gmm_idcs = jnp.arange(self.weights.shape[0])
+        R = calc_R(site, fault, self.R_metrics)
         def apply(Mw, site, fault, gmm_idx):
-            return lax.switch(gmm_idx, self.gmms, Mw, site, fault)
+            return lax.switch(gmm_idx, self.gmms, Mw, site, fault, R)
         all_lnSA, all_std = jax.vmap(jtu.Partial(apply, Mw, site, fault))(gmm_idcs)
         return all_lnSA, all_std
     
@@ -345,11 +354,11 @@ class GMMLT:
         return mean_lnSA, mean_std
 
     def tree_flatten(self):
-        return (self.weights), self.gmms
+        return (self.weights), (self.weights, self.R_metrics)
     
     @classmethod
     def tree_unflatten(cls, aux, children):
-        return cls(aux, *children)
+        return cls(*aux, *children)
     
 def calc_haz(IM:float, M_min:float, gmms:GMMLT, scn:Scenario, n:int = 30):
     # roots + weights for magnitude integral

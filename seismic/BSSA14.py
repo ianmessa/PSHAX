@@ -92,8 +92,8 @@ def f_sigma(Mw, vs30, R_jb):
     phi = lax.select(filter_v, phi_v_mod, phi)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_BSSA14(Mw:float, site:Site, fault:Fault):
-    R_jb = calc_R_jb(site, fault)
+def f_BSSA14(Mw:float, site:Site, fault:Fault, R:jax.Array):
+    R_jb, R_rup, R_epi, R_hyp, R_x = R
     SOF_flag = fault.calc_SOF_flag()
     lnSA = f_lnSA(Mw, SOF_flag, site.vs30, site.z1p0, R_jb)
     std = f_sigma(Mw, site.vs30, R_jb)
