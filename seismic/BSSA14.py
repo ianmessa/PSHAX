@@ -11,40 +11,69 @@ gmc = pl.read_csv(files("seismic") / "BSSA14_coeffs.csv")
 
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
+gmc = gmc.with_columns([pl.col("T").cast(pl.Float64)])
+gmc = gmc.sort('T')
 gmc_col = gmc.columns
 gmc = gmc.cast(pl.Float64).to_jax().T
 
-T = gmc[0]
-T_sort = jnp.argsort(T)
-empty = jnp.zeros_like(T, dtype = float)
-e = gmc[1:8]
-Mh = gmc[8]
-c = gmc[9:12]
-c = jnp.insert(c, 0, empty, 0)
-M_ref, R_ref, h, Dc3CaTw, Dc3CnTr, Dc3ItJp = gmc[12:18]
-c_lin, vc, v_ref, = gmc[18:21]
-F = gmc[21:27]
-F = jnp.insert(F, 0, empty, axis = 0)
-F = jnp.insert(F, 2, empty, axis = 0)
-R1, R2 = gmc[27:29]
-dPhi_R, dPhi_v = gmc[29:31]
-v1, v2, phi1, phi2, tau1, tau2 = gmc[31:]
+T_BSSA = gmc[0]
+empty_all = jnp.zeros_like(T_BSSA, dtype = float)
+e_all = gmc[1:8]
+# This wasn't here before. May cause problems, must unit test against API.
+#   Again.
+e_all = jnp.concat([empty_all[None], e_all], axis = 0)
+Mh_all = gmc[8]
+c_all = gmc[9:12]
+c_all = jnp.concat([empty_all[None], c_all], axis = 0)
+M_ref_all, R_ref_all, h_all = gmc[12:15]
+Dc3CaTw_all, Dc3CnTr_all, Dc3ItJp_all = gmc[15:18]
+c_lin_all, vc_all, v_ref_all = gmc[18:21]
+F_all = gmc[21:27]
+F_all = jnp.insert(F_all, 0, empty_all, axis = 0)
+F_all = jnp.insert(F_all, 2, empty_all, axis = 0)
+R1_all, R2_all = gmc[27:29]
+dPhi_R_all, dPhi_v_all = gmc[29:31]
+v1_all, v2_all, phi1_all, phi2_all, tau1_all, tau2_all = gmc[31:]
+
+others_all = jnp.stack([Mh_all, M_ref_all, R_ref_all, h_all,
+                          Dc3CaTw_all, Dc3CnTr_all, Dc3ItJp_all,
+                          c_lin_all, vc_all, v_ref_all,
+                          R1_all, R2_all, dPhi_R_all, dPhi_v_all,
+                          v1_all, v2_all, phi1_all, phi2_all, tau1_all, tau2_all], axis = 0)
+
 A4 = 570.94 ** 4
 B4 = 1360 ** 4
 
+def slice_coeffs(T):
+    T_idx = jnp.searchsorted(T_BSSA, T) - 1
+    T_slice = lax.dynamic_slice_in_dim(T_BSSA, T_idx, 2, axis = -1)
+    e = lax.dynamic_slice_in_dim(e_all, T_idx, 2, axis = -1)
+    c = lax.dynamic_slice_in_dim(c_all, T_idx, 2, axis = -1)
+    F = lax.dynamic_slice_in_dim(F_all, T_idx, 2, axis = -1)
+    others = lax.dynamic_slice_in_dim(others_all, T_idx, 2, axis = -1)
+    Mh, M_ref, R_ref, h, Dc3CaTw, Dc3CnTr, Dc3ItJp = others[:7]
+    c_lin, vc, v_ref, R1, R2, dPhi_R, dPhi_v = others[7:14]
+    v1, v2, phi1, phi2, tau1, tau2 = others[14:]
+    return (T_slice, (e, Mh), (c, M_ref, R_ref, Dc3CaTw), (F, vc, c_lin, v_ref), h, (tau1, tau2, phi1, phi2, dPhi_R, dPhi_v, R1, R2, v1, v2))
+
 # Source term
-def f_source(Mw, SOF_flag):
-    SOF_idx = (SOF_flag + 1).astype(jnp.int32)
-    e_SOF = lax.select_n(SOF_idx, e[3], e[1], e[2])
+def f_source(Mw, SOF_flag, source_coeffs):
+    e, Mh = source_coeffs
+    rv_filt = SOF_flag == -1
+    ss_filt = SOF_flag == 0
+    nm_filt = SOF_flag == 1
+    e_SOF = rv_filt * e[3] + ss_filt * e[1] + nm_filt * e[2]
     MwMh = Mw - Mh
-    e_addn = lax.select(Mw <= Mh, e[4] * MwMh + e[5] * MwMh ** 2, e[6] * MwMh)
+    e_addn = jnp.where(MwMh <= 0, e[4] * MwMh + e[5] * MwMh ** 2, e[6] * MwMh)
     return e_SOF + e_addn
 
-def f_path(Mw, R):
+def f_path(Mw, R, path_coeffs):
+    c, M_ref, R_ref, Dc3CaTw = path_coeffs
     return jnp.log(R / R_ref) * (c[1] + c[2] * (Mw - M_ref)) + (c[3] + Dc3CaTw) * (R - R_ref)
 
 # Site term
-def f_site(vs30, z1p0, PGA_rock):
+def f_site(vs30, z1p0, PGA_rock, T, site_coeffs):
+    F, vc, c_lin, v_ref = site_coeffs
     vs_lin = jnp.clip(vs30, max = vc)
     ln_Flin = c_lin * jnp.log(vs_lin / v_ref)
 
@@ -60,22 +89,28 @@ def f_site(vs30, z1p0, PGA_rock):
     F_dz1 = lax.select(filter1, F[7], F_dz1)
     # Turn low periods to zero
     filter2 = T < 0.65
-    F_dz1 = lax.select(filter2, empty, F_dz1)
+    F_dz1 = jnp.where(filter2, 0., F_dz1)
 
     return ln_Flin + ln_Fnl + F_dz1
 
-def f_lnSA(Mw, SOF_flag, 
+def f_lnSA(Mw, T, SOF_flag, 
            vs30, z1p0, 
-           R_jb):
+           R_jb, 
+           source_coeffs,
+           path_coeffs,
+           site_coeffs,
+           h):
     R = (R_jb ** 2 + h ** 2) ** (1 / 2)
     # Add index to select PGA?...
-    PGA_rock = jnp.exp(f_source(Mw, SOF_flag) + f_path(Mw, R))
+    PGA_rock = jnp.exp(f_source(Mw, SOF_flag, source_coeffs) + f_path(Mw, R, path_coeffs))
     
-    return f_source(Mw, SOF_flag) + \
-           f_path(Mw, R) + \
-           f_site(vs30, z1p0, PGA_rock)
+    return f_source(Mw, SOF_flag, source_coeffs) + \
+           f_path(Mw, R, path_coeffs) + \
+           f_site(vs30, z1p0, PGA_rock, T, site_coeffs)
 
-def f_sigma(Mw, vs30, R_jb):
+def f_sigma(Mw, vs30, R_jb,
+            sigma_coeffs):
+    tau1, tau2, phi1, phi2, dPhi_R, dPhi_v, R1, R2, v1, v2 = sigma_coeffs
     tau = jnp.clip(tau1 + (tau2 - tau1) * (Mw - 4.5), 
                    min = tau1, max = tau2)
     phi = jnp.clip(phi1 + (phi2 - phi1) * (Mw - 4.5), 
@@ -92,11 +127,16 @@ def f_sigma(Mw, vs30, R_jb):
     phi = lax.select(filter_v, phi_v_mod, phi)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_BSSA14(Mw:float, site:Site, fault:Fault, R:jax.Array):
-    R_jb, R_rup, R_epi, R_hyp, R_x = R
+def f_BSSA14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
+    T_slice, source_coeffs, path_coeffs, site_coeffs, h, sigma_coeffs = slice_coeffs(T)
+
     SOF_flag = fault.calc_SOF_flag()
-    lnSA = f_lnSA(Mw, SOF_flag, site.vs30, site.z1p0, R_jb)
-    std = f_sigma(Mw, site.vs30, R_jb)
-    lnSA = jnp.interp(T_master, T[T_sort], lnSA[T_sort])
-    std = jnp.interp(T_master, T[T_sort], std[T_sort])
+    R_jb, R_rup, R_epi, R_hyp, R_x = R
+
+    lnSA = f_lnSA(Mw, T_slice, SOF_flag, site.vs30, site.z1p0, R_jb,
+                  source_coeffs, path_coeffs, site_coeffs, h)
+    std = f_sigma(Mw, site.vs30, R_jb, 
+                  sigma_coeffs)
+    lnSA = jnp.interp(T, T_slice, lnSA)
+    std = jnp.interp(T, T_slice, std)
     return lnSA, std
