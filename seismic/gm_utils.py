@@ -3,8 +3,7 @@ from jax import lax
 from jax import numpy as jnp
 from jax import tree_util as jtu
 from jax import tree as jt
-
-from jax.scipy.stats.norm import cdf as gaussian_cdf
+from jax.scipy.stats.truncnorm import cdf as trunc_norm_cdf
 
 from numerics import *
 
@@ -35,13 +34,12 @@ def rake_SOF_flag(rake:float):
     # [reverse, SS, normal] -> [-1., 0., 1.]
     return (is_SS * - jnp.sign(rake))
 
-# Earthquake Rupture Forecast (Gutenberg-Richter MFD)
 @jtu.register_pytree_node_class
-class ERF:
+class MFD:
     def __init__(self, a:float, b:float, 
                        M_min:float = 4.0, M_max:float = 8.0):
         """
-        Earthquake Rupture Forecast represented by a Gutenberg–Richter magnitude
+        Magnitude Frequency Dist. represented by a Gutenberg–Richter magnitude
         frequency distribution.
 
         Args
@@ -58,16 +56,17 @@ class ERF:
         self.a, self.b = a, b
         self.M_min, self.M_max = M_min, M_max
 
-    def calc_N(self, M):
+    def calc_lmdaM(self, M):
+        """Calculate rate of earthquakes exceeding magnitude M."""
         return 10 ** (self.a - self.b * M)
 
-    def calc_n(self, M):
-        return jnp.log(10) * self.b * self.calc_N(M)
+    def calc_FM(self, M):
+        """Calculate probability of magnitude exceedance."""
+        return 1 - 10 ** -(self.b * (M - self.M_min))
     
-    def cumprob_M(self, M):
-        num = 10 ** (-self.b * self.M_min) - 10 ** (-self.b * M)
-        denom = 10 ** (-self.b * self.M_min) - 10 ** (-self.b * self.M_max)
-        return num / denom
+    def calc_fM(self, M):
+        """Calculate probability for single magnitude occurrence."""
+        return (self.b * jnp.log(2.1) * (1 - self.calc_FM(M))) / self.calc_FM(self.M_max)
     
     def tree_flatten(self):
         return (self.a, self.b, self.M_min, self.M_max), None
@@ -104,7 +103,7 @@ class Site:
 class Fault:
     def __init__(self, x:float, y:float, z_hyp:float, z_tor:float, theta:float,
                        dip:float, rake:float, width:float,
-                       HW_flag:float, erf:ERF):
+                       HW_flag:float, mfd:MFD):
         """
         Initialize a Fault object.
 
@@ -127,7 +126,7 @@ class Fault:
             Rupture width (extent down-dip) (km).
         HW_flag : float
             Hanging-wall indicator / half-width parameter. Float, but should be 0 or 1.
-        erf : ERF
+        mfd : MFD
             Earthquake Rupture Forecast object associated with fault.
         """
         
@@ -140,7 +139,7 @@ class Fault:
 
         self.HW_flag = HW_flag
 
-        self.erf = erf
+        self.mfd = mfd
     
     def calc_xy_hyp(self):
         """
@@ -177,7 +176,7 @@ class Fault:
         return rake_SOF_flag(self.rake)
 
     def tree_flatten(self):
-        return (self.x, self.y, self.z_hyp, self.z_tor, self.theta, self.dip, self.rake, self.width, self.HW_flag, self.erf), None
+        return (self.x, self.y, self.z_hyp, self.z_tor, self.theta, self.dip, self.rake, self.width, self.HW_flag, self.mfd), None
     
     @classmethod
     def tree_unflatten(cls, aux, children):
@@ -331,43 +330,64 @@ class Scenario:
     
 @jtu.register_pytree_node_class
 class GMMLT:
-    def __init__(self, gmms:list, weights:jax.typing.ArrayLike):
+    def __init__(self, gmms:list, T:float, weights:jax.typing.ArrayLike):
+        self.T = T
         self.gmms = gmms
         self.weights = weights
 
-    def calc_all(self, Mw:float, site:Site, fault:Fault):
-        gmm_idcs = jnp.arange(self.weights.shape[0])
-        R = calc_R(site, fault)
-        def apply(Mw, site, fault, gmm_idx):
-            return lax.switch(gmm_idx, self.gmms, Mw, site, fault, R)
-        all_lnSA, all_std = jax.vmap(jtu.Partial(apply, Mw, site, fault))(gmm_idcs)
-        return all_lnSA, all_std
-    
-    def calc_mean(self, Mw:float, site:Site, fault:Fault):
-        all_lnSA, all_std = self.calc_all(Mw, site, fault)
-        mean_lnSA = self.weights @ all_lnSA
-        mean_std = (self.weights @ (all_lnSA ** 2 + all_std ** 2) - (self.weights @ all_lnSA) ** 2) ** (1 / 2)
-        return mean_lnSA, mean_std
+    # Calculate for a single GMM. Takes R so we don't repeat the calculation every time.
+    def calc_single(self, i:int, Mw:float, site:Site, fault:Fault, R:jax.Array):
+        return lax.switch(i, self.gmms, Mw, self.T, site, fault, R)
 
     def tree_flatten(self):
-        return (self.weights), (self.weights, self.R_metrics)
+        return (self.T, self.weights), self.gmms
     
     @classmethod
     def tree_unflatten(cls, aux, children):
-        return cls(*aux, *children)
-    
-def calc_haz(IM:float, M_min:float, gmms:GMMLT, scn:Scenario, n:int = 30):
-    # roots + weights for magnitude integral
-    roots_M, weights_M = mvrw_sobol(1, M_min, 8.0, n)
-    # ERF incremental rates for Legendre roots
-    n_M = jax.vmap(scn.fault_tree.erf.calc_n)(roots_M).T
-    # Ground motion means + stds for each fault at Legendre roots
-    mu_lnSA, std_lnSA = jax.vmap(jax.vmap(gmms.calc_mean, in_axes = (0, None, None)), in_axes = (None, None, 0))(roots_M, scn.site, scn.fault_tree)
-    # Probabilities of exceedance 
-    prob_IM = 1 - gaussian_cdf(jnp.log(IM), mu_lnSA, std_lnSA)
+        return cls(aux, *children)
+
+def calc_haz(x:float, M_min:float, gmms:GMMLT, scn:Scenario, dM:float = 0.1):
+    fault_num = scn.fault_tree.x.shape[0]
+    M_min, M_max = scn.fault_tree.mfd.M_min, scn.fault_tree.mfd.M_max
+
+    # Magnitude bins.
+    bins_M = jnp.arange(M_min.min(), M_max.max() + dM, dM)
+    # MFD rates
+    n_M = jax.vmap(scn.fault_tree.mfd.calc_lmdaM)(bins_M)
+    # Take difference to make incremental
+    n_M_inc = n_M[:-1] - n_M[1:]
+
+    # Roots for GMM evaluation.
+    roots_M = (bins_M[:-1] + bins_M[1:]) / 2
+    # Array of ones/zeros for each fault signifying array inside/outside range (shape (roots_M.shape, fault_num))
+    weights_mask = (roots_M[:, None] > M_min[None, :]) & (roots_M[:, None] < M_max[None, :])
+    # We can think of our incremental rates as already including quadrature weights, so 
+    #   we'll just multiply them by the mask to be safe. 
+    n_M_inc = n_M_inc * weights_mask
+
+    # Ground motion means + stds for each fault at roots
+    # Calculate R for full fault tree...
+    R_tree = jax.vmap(calc_R, in_axes = (None, 0))(scn.site, scn.fault_tree)
+    # Triple vmap. First, across faults (and corresponding distances),
+    calc_faults = jax.vmap(gmms.calc_single, in_axes=(None, None, None, 0, 0))
+    # Then across magnitudes,
+    calc_M = jax.vmap(calc_faults, in_axes=(None, 0, None, None, None))
+    # Then across GMMs. This order minimizes recompilation.
+    calc_gmms = jax.vmap(calc_M, in_axes=(0, None, None, None, None))
+    # Grab indices and vmap across
+    gmm_idcs = jnp.arange(len(gmms.gmms))
+    all_mu_lnSA, all_std_lnSA = calc_gmms(gmm_idcs, roots_M, scn.site, scn.fault_tree, R_tree)
+    # Get PoE at all points
+    all_prob_x = 1 - trunc_norm_cdf(jnp.log(x), 
+                                    a = -jnp.inf, b = 3 * all_std_lnSA, 
+                                    loc = all_mu_lnSA, scale = all_std_lnSA)
+
+    # Take mean
+    mu_prob_x = jnp.einsum('i,ijk->jk', gmms.weights, all_prob_x)
+
     # Hazard integrand (magnitude probabilities * exceedance probabilities)
-    haz_intgrnd = n_M[:, :, None] * prob_IM
-    # Integrate using mag weights
-    haz_intgrl = jnp.einsum('j,ijk->ik', weights_M, haz_intgrnd)
-    haz = haz_intgrl.sum(axis = 0)
-    return haz
+    haz_intgrnd = mu_prob_x * n_M_inc
+
+    # Return the sum since our "quadrature weights" are basically
+    #   included in our frequency bins
+    return haz_intgrnd.sum()
