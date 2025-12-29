@@ -1,4 +1,4 @@
 from .integrate import *
-from .misc import *
+from .sampling import *
 from .sobol import *
 from .spectral import *

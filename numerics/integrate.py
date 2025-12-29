@@ -9,7 +9,7 @@ from .spectral import *
 from .sobol import *
 
 # Legendre roots
-def rw_P(k:int, tol:float = 1e-14):
+def rw_GL(k:int, tol:float = 1e-14):
     """
     Generates k roots from Legendre polynomials using Newton's method. 
 
@@ -32,7 +32,7 @@ def rw_P(k:int, tol:float = 1e-14):
     k_range = jnp.arange(k) + 1
     x0 = jnp.cos(jnp.pi * (4 * k_range - 1) / (4 * k + 2))[::-1]
     # Each time, k_exc will be k + 1 so we can grab the kth polynomial.
-    P_km1, P_k = uv_psi(x0, basis = 'P', k_exc = k + 1)[-2:]
+    P_km1, P_k = uv_psi(x0, basis = 'P', k_exc = k + 1)[:, -2:].T
     init_state = (x0, P_km1, P_k)
     
     # Newton raphson
@@ -42,7 +42,7 @@ def rw_P(k:int, tol:float = 1e-14):
         dPdx_k = k * (P_km1 - x * P_k) / (1 - x ** 2)
         x = x - (P_k / dPdx_k)
         P = uv_psi(x, basis = 'P', k_exc = k + 1)
-        P_km1, P_k= P[-2:]
+        P_km1, P_k= P[:, -2:].T
         return (x, P_km1, P_k)
     
     def cond_fn(state):
@@ -54,128 +54,6 @@ def rw_P(k:int, tol:float = 1e-14):
     w = (2 * (1 - x ** 2)) / (k ** 2 * P_nm1 ** 2)
 
     return x, w
-
-# Univariate Gauss-Legendre Quadrature 
-# TODO: jit with staticargs n, tol
-def uv_GL_quad(F:Callable, a:float, b:float, n:int, tol:float = 1e-14):
-    """
-    Univariate Gauss-Legendre Quadrature. 
-
-    Parameters
-    ----------
-    F : Callable
-        A scalar-input/scalar-output vectorizable function.
-    a : float
-        Lower integration bound.
-    b: float
-        Upper integration bound. 
-    n: int
-        Number of quadrature points.
-    tol : float, optional
-        Absoulte tolerance for Newton-Raphson
-
-    Returns
-    -------
-    y: The integral of the function over [a, b]. 
-    """
-    # Obvious
-    r, w = rw_P(n, tol = tol)
-
-    r_scaled = r * (b - a) / 2 + (a + b) / 2
-    w_scaled = w * (b - a) / 2
-
-    return jax.vmap(F)(r_scaled) @ w_scaled
-
-# Multivariate Gauss-Legendre Quadrature
-# TODO: jit with staticargs dim, n, tol
-def mv_GL_quad(F:Callable, dim:int, a:float|jax.Array, b:float|jax.Array, n:int, tol:float = 1e-14):
-    """
-    Multivariate Gauss-Legendre Quadrature. We use the same # of quadrature points
-    in all dimensions.
-
-    Parameters
-    ----------
-    F : Callable
-        A function that takes array argument of shape (dim,) and returns a float.
-    dim : int
-        Number of dimensions for integration.
-    a : float | jax.Array
-        Lower integration bound. If float, broadcasted to shape (dim,), otherwise
-        must be of shape (dim,).
-    b : float | jax.Array
-        Upper integration bound. If float, broadcasted to shape (dim,), otherwise
-        must be of shape (dim,).
-    n : int
-        Number of quadrature points (must be divisible by dimension).
-    tol : float, optional
-        Absoulte tolerance for Newton-Raphson
-
-    Returns
-    -------
-    y: The integral of the function over [a, b]. 
-    """
-    check(n % dim == 0, 'Number of points must be divisible by dimension...')
-    # Take roots, weights (TODO: using floor because we'll probably get rid of that check)
-    r, w = rw_P(n // dim, tol = tol)
-
-    # Broadcast a and b
-    a, b = jnp.broadcast_to(a, dim), jnp.broadcast_to(b, dim)
-
-    # Tensorize
-    R = jnp.stack(jnp.meshgrid(*[r] * dim), axis = -1).reshape((n // dim) ** dim, dim)
-    W = jnp.stack(jnp.meshgrid(*[w] * dim), axis = -1).reshape((n // dim) ** dim, dim)
-
-    # Scale tensors
-    R_scaled = R * (b - a) / 2 + (a + b) / 2
-    W_scaled = W * (b - a) / 2
-
-    # Take tensor product for weights
-    W_scaled = jnp.prod(W_scaled, axis = 1)
-
-    # Return
-    return jax.vmap(F)(R_scaled) @ W_scaled
-
-# TODO: jit with staticargs dim, n, trials
-def mv_RQMC_quad(F:callable, dim:int, a:float|jax.Array, b:float|jax.Array, n:int, trials:int, key:jax.Array):
-    """
-    Multivariate Randomized Quasi-Monte Carlo (Sobol) Quadrature. 
-
-    Parameters
-    ----------
-    F : Callable
-        A function that takes array argument of shape (dim,) and returns a float.
-    dim : int
-        Number of dimensions for integration.
-    a : float | jax.Array
-        Lower integration bound. If float, broadcasted to shape (dim,), otherwise
-        must be of shape (dim,).
-    b : float | jax.Array
-        Upper integration bound. If float, broadcasted to shape (dim,), otherwise
-        must be of shape (dim,).
-    n : int
-        Number of quadrature points (must be divisible by dimension).
-    trials : int
-        Number of randomized integrations to perform.
-    key: jax.Array
-        PRNG key.
-
-    Returns
-    -------
-    Y: The integral of the function over [a, b] averaged across trials
-    """
-    # Generate sequence
-    X = sobol(dim, n, a, b)
-    # Apply Cranley-Patterson
-    X_scrambled = jax.vmap(jtu.Partial(CP_rotation, X = X, a = a, b = b))(key = jrnd.split(key, trials))
-
-    # Uniform weights
-    W = jnp.prod(b - a) / n
-    
-    # Evaluate F at all points
-    Y = jax.vmap(jax.vmap(F))(X_scrambled)
-
-    # Return average
-    return Y.sum() * W / trials
 
 # Multivariate roots and weights
 def mvrw_GL(dim:int, a:float|jax.Array, b:float|jax.Array, n:int):
@@ -205,7 +83,7 @@ def mvrw_GL(dim:int, a:float|jax.Array, b:float|jax.Array, n:int):
     """
     
     # Get Legendre RW
-    r, w = rw_P(n)
+    r, w = rw_GL(n)
     # Cartesian product
     rr = jnp.stack(jnp.meshgrid(*[r] * dim), axis = -1).reshape(n ** dim, dim)
     ww = jnp.stack(jnp.meshgrid(*[w] * dim), axis = -1).reshape(n ** dim, dim)
@@ -233,7 +111,40 @@ def mvrw_sobol(dim:int, a:float|jax.Array, b:float|jax.Array, n:int):
     b : array-like or scalar
         Upper bound(s) of the domain. Must be broadcastable to shape (dim,).
     n : int
+        Number of subdivisions per dimension; total samples produced = is 2^(int(log2(n))).
+
+    Returns
+    -------
+    rr : jnp.ndarray, shape (n**dim, dim)
+        Sobol points scaled to the hyper-rectangle [a, b].
+    ww : jnp.ndarray, shape (n**dim,)
+        Constant weights equal to volume_of_domain / (n ** dim).
+    """
+    # Straightforward
+    log2n = int(jnp.log2(n))
+    rr = sobol(dim, log2n)
+    n = rr.shape[0]
+    rr = rr * (b - a) + a
+    rr = CP_rotation()
+    w = jnp.prod(b - a) / (n ** dim)
+    ww = jnp.full(n ** dim, w)
+    return rr, ww
+
+def mvrw_RQMC(dim:int, a:float|jax.Array, b:float|jax.Array, n:int, key:jax.Array):
+    """CP-Rotated sobol points and rectangular weights for a rectangular domain.
+
+    Parameters
+    ----------
+    dim : int
+        Number of dimensions.
+    a : array-like or scalar
+        Lower bound(s) of the domain. Must be broadcastable to shape (dim,).
+    b : array-like or scalar
+        Upper bound(s) of the domain. Must be broadcastable to shape (dim,).
+    n : int
         Number of subdivisions per dimension; total samples produced = n ** dim.
+    key : jax.Array
+        PRNG Key.
 
     Returns
     -------
@@ -249,6 +160,7 @@ def mvrw_sobol(dim:int, a:float|jax.Array, b:float|jax.Array, n:int):
     ww = jnp.full(n ** dim, w)
     return rr, ww
 
+## UNUSED
 def mvrw_GLQMC(dim:int, a:float|jax.Array, b:float|jax.Array, n:int, m:int = 50):
     """
     Compute multivariate quadrature nodes and product weights by interpolating
@@ -279,7 +191,7 @@ def mvrw_GLQMC(dim:int, a:float|jax.Array, b:float|jax.Array, n:int, m:int = 50)
     # interpolation space
     i = jnp.linspace(-1., 1., m)
     # GL roots and weights for interpolation
-    r_GL, w_GL = rw_P(m)
+    r_GL, w_GL = rw_GL(m)
     # Sobol roots to stretch
     r_sobol, _ = mvrw_sobol(dim, -1., 1., n)
     # Treat data as (i, r_GL) and (i, w_GL) and interpolate values at sobol points

@@ -76,6 +76,7 @@ V = jax.vmap(update_V_i)(V, m, binary_incl)
 def sobol(dim:int, n:int = 150): 
     """
     Draw samples from Sobol sequence.
+
     Parameters
     ----------
     dim : int
@@ -110,11 +111,12 @@ def sobol(dim:int, n:int = 150):
 
     return X
 
-def CP_rotation(key:jax.Array, X:jax.Array):
+def CP_rotation(X:jax.Array, key:jax.Array):
     """
     Applies a randomized coordinate-wise rotation (Cranley-Patterson Rotation) to the input array `X` using a JAX random key.
     This function generates random vectors within specified bounds and applies a transformation
     to `X` that shifts, wraps, and repositions its values in each dimension.
+
     Parameters
     ----------
     key : jax.Array
