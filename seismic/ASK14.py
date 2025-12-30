@@ -16,36 +16,39 @@ gmc[-1, 'T'] = -2.
 gmc = gmc.with_columns([pl.col("T").cast(pl.Float64)])
 gmc = gmc.sort('T')
 gmc_col = gmc.columns
+gmcdf = gmc
 gmc = gmc.cast(pl.Float64).to_jax().T
 
-# First few
-T_ASK, v_lin_all, b_all = gmc[:3]
-N_all, M1_all, c_all, c4_all = gmc[3:7]
+T_ASK, v_lin_all, b_all, _, M1_all, c_all, c4_all = gmc[:7]
+empty = jnp.zeros_like(T_ASK)
+a1thru8_all = gmc[7:15]
+a10thru17_all = gmc[15:23]
+a43thru46_all = gmc[23:27]
+a25_all, a28_all, a29_all, a31_all = gmc[27:31]
+a36thru42_all = gmc[31:38]
+
+a_all = jnp.concatenate([empty[None], a1thru8_all, empty[None], a10thru17_all] + \
+                         7 * [empty[None]] + [a25_all[None]] + \
+                         2 * [empty[None]] + \
+                             [a28_all[None], a29_all[None], empty[None], a31_all[None]] + \
+                         4 * [empty[None]] + \
+                             [a36thru42_all, a43thru46_all])
+
+s1est_all, s2est_all, s3_all, s4_all, s1m_all, s2m_all, s5_all, s6_all = gmc[38:]
+s_all = jnp.stack([empty, s1m_all, s2m_all, 
+                         s3_all, s4_all, 
+                         s5_all, s6_all])
+s_est_all = jnp.stack([empty, s1est_all, s2est_all])
+
 M2 = 5.0
-# Update M with constant for M2 and 0-row for M0
-empty_all = jnp.zeros_like(T_ASK)
-
-# Get a. But they're all out of order...
-a_all = gmc[7:38]
-a_idcs = jnp.array([int(ai[1:]) for ai in gmc_col[7:38]])
-a_all = a_all[jnp.argsort(a_idcs)]
-a_missing = jnp.arange(a_idcs.max())
-a_missing = a_missing[~jnp.isin(a_missing, a_idcs)]
-# Update indices to account for insertions
-a_missing = a_missing - jnp.arange(a_missing.shape[0])
-a_all = jnp.insert(a_all, a_missing, empty_all, axis = 0)
-
-# Grab s
-s_est_all = gmc[38:40]
-s_est_all = jnp.insert(s_est_all, 0, empty_all, axis = 0)
-s_all = gmc[40:]
-s_all = jnp.insert(s_all, 0, empty_all, axis = 0)
-
 A = 610 ** 4
 B = 1360 ** 4 + A
 vs_rock = 1180
-a2_HW = 0.2
+A2_HW = 0.2
+A3, A4, A5 = 0.275, -0.1, -0.41
+N = 1.5
 H1, H2, H3 = 0.25, 1.5, -0.75
+c4 = 4.5
 phi_amp_sq = 0.16
 # Omit 1000 because of Jax interp behavior (constant extrapolation for
 #   values above 700 so we don't need to worry about 1000)
@@ -56,35 +59,34 @@ v1_all = jnp.exp(-0.35 * jnp.log(T_ASK / 0.5) + jnp.log(1500))
 v1_all = v1_all.at[T_ASK <= 0.5].set(1500)
 v1_all = v1_all.at[T_ASK >= 3].set(800)
 
-c_other_all = jnp.stack([M1_all, b_all, c_all, c4_all, v_lin_all, v1_all, N_all], axis = 0)
+other_all = jnp.stack([M1_all, b_all, c_all, c4_all, v_lin_all, v1_all])
+
+coeffs_all = jnp.concat([a_all, s_all, s_est_all, other_all])
 
 def slice_coeffs(T):
     T_idx = jnp.searchsorted(T_ASK, T) - 1
     T_slice = lax.dynamic_slice_in_dim(T_ASK, T_idx, 2, axis = -1)
-    a = lax.dynamic_slice_in_dim(a_all, T_idx, 2, axis = -1)
-    s_est = lax.dynamic_slice_in_dim(s_est_all, T_idx, 2, axis = -1)
-    s = lax.dynamic_slice_in_dim(s_all, T_idx, 2, axis = -1)
-    c_other = lax.dynamic_slice_in_dim(c_other_all, T_idx, 2, axis = -1)
-    return (T_slice, a, c_other, (s_est, s))
+    coeffs = lax.dynamic_slice_in_dim(coeffs_all, T_idx, 2, axis = -1)
+    a = coeffs[:47]
+    c_sigma = coeffs[47:57]
+    c_other = coeffs[57:]
+    return (T_slice, a, c_other, c_sigma)
 
-def f_dAmp(vs30, SA_rock,
-           c_other):
-    _, b, c, _, v_lin, _, N = c_other
-    dAmp = (-b * SA_rock) / (SA_rock + c) + (b * SA_rock) / (SA_rock + c * (vs30 / v_lin) ** N)
-    return jnp.where(vs30 >= v_lin, 0., dAmp)
-
-def f1(Mw, R_rup, R, a,
-       M1):
-    f1_base = a[1] + a[17] * R_rup
-    M_floor = jnp.clip(Mw, min = M2)
-    dM1 = M_floor - M1
-    dM_max = (8.5 - M_floor) ** 2
-    dM2 = Mw - M2
+T_slice, a, c_other, c_sigma = slice_coeffs(0.5)
     
-    A_capped = a[4] + (a[5] - a[4]) * (Mw > M1)
-    dM2_coeff = (Mw < M2) * (a[6] * dM2)
-
-    return f1_base + A_capped * dM1 + a[8] * dM_max + dM2_coeff * dM2 + jnp.log(R) * (a[2] + a[3] * dM1)
+def f1(Mw, R_rup, a,
+       M1):
+    c4_mag = jnp.clip(c4 - (c4 - 1.0) * (5. - Mw), min = 1., max = c4)
+    R = jnp.sqrt(R_rup ** 2 + c4_mag ** 2)
+    base = a[1] + a[17] * R_rup
+    # A coefficient
+    f1A = jnp.where(Mw > M1, A5, A4)
+    # Magnitude differences for low-magnitude case
+    MaxM = jnp.where(Mw < M2, M2, Mw)
+    MM1 = MaxM - M1
+    Msq = (8.5 - MaxM) ** 2
+    MwM2 = Mw - M2
+    return base + f1A * MM1 + a[8] * Msq + jnp.where(Mw < M2, a[6], 0.) * MwM2 + (a[2] + A3 * MM1) * jnp.log(R)
 
 def f7_8(Mw, SOF_flag,
          a):
@@ -93,7 +95,7 @@ def f7_8(Mw, SOF_flag,
 
 def f5(vs30, SA_rock,
        a, c_other):
-    _, b, c, _, v_lin, v1, N = c_other
+    _, b, c, _, v_lin, v1= c_other
     vs30_star = jnp.clip(vs30, max = v1)
     return a[10] * jnp.log(vs30_star / v_lin) - b * jnp.log(SA_rock + c) + b * jnp.log(SA_rock + c * (vs30_star / v_lin) ** N)
 
@@ -101,7 +103,7 @@ def f4(Mw, width, dip, R_jb, R_x, z_tor,
        a):
     T1 = jnp.clip(2 - (dip / 45), min = 4 / 3)
 
-    T2 = 1 + a2_HW * (Mw - 6.5) + jnp.where(Mw < 6.5, (1 - a2_HW) * (Mw - 6.5) ** 2, 0.)
+    T2 = 1 + A2_HW * (Mw - 6.5) + jnp.where(Mw < 6.5, (1 - A2_HW) * (Mw - 6.5) ** 2, 0.)
     
     r1 = width * jnp.cos(jnp.deg2rad(dip))
     r2 = 3 * r1
@@ -131,18 +133,23 @@ def f10(vs30, z1p0,
     z1p0_soil = z1p0_soil * jnp.log((z1p0 + 0.1) / (z1p0_ref + 0.1))
     return z1p0_soil
 
+def f_dAmp(vs30, SA_rock,
+           c_other):
+    _, b, c, _, v_lin, _= c_other
+    dAmp = (-b * SA_rock) / (SA_rock + c) + (b * SA_rock) / (SA_rock + c * (vs30 / v_lin) ** N)
+    return jnp.where(vs30 >= v_lin, 0., dAmp)
+
 def f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
                    vs30, z1p0,
                    R_jb, R_rup, R_x,
                    a, c_other
                    ):
-    _, b, _, c4, v_lin, v1, N = c_other
+    M1, b, _, c4, v_lin, v1= c_other
     c4_mag = jnp.clip(c4 - (c4 - 1) * (5 - Mw), min = 1, max = c4)
-    R = (R_rup ** 2 + c4_mag ** 2) ** (1 / 2)
     vs_rock_capped = jnp.clip(vs_rock, max = v1)
     lnSA5_rock = (a[10] + b * N) * jnp.log(vs_rock_capped / v_lin)
     
-    lnSA1 = f1(Mw, R_rup, R, a, c_other[0])
+    lnSA1 = f1(Mw, R_rup, a, M1)
     lnSA7_8 = f7_8(Mw, SOF_flag, a)
     lnSA4 = f4(Mw, width, dip, R_jb, R_x, z_tor, a)
     lnSA6 = f6(z_tor, a)
@@ -158,7 +165,7 @@ def f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
 
 def f_sigma(Mw, vs30, vs30inf_flag, SA_rock,
             sigma_coeffs, c_other):
-    s_est, s = sigma_coeffs
+    s, s_est = sigma_coeffs[:-3], sigma_coeffs[-3:]
     dAmp_p1 = f_dAmp(vs30, SA_rock, c_other) + 1
     vs30_s = jnp.where(vs30inf_flag == 1., s_est, s[:3])
 

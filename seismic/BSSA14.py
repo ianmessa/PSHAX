@@ -19,9 +19,6 @@ gmc = gmc.cast(pl.Float64).to_jax().T
 T_BSSA = gmc[0]
 empty_all = jnp.zeros_like(T_BSSA, dtype = float)
 e_all = gmc[1:8]
-# This wasn't here before. May cause problems, must unit test against API.
-#   Again.
-e_all = jnp.concat([empty_all[None], e_all], axis = 0)
 Mh_all = gmc[8]
 c_all = gmc[9:12]
 c_all = jnp.concat([empty_all[None], c_all], axis = 0)
