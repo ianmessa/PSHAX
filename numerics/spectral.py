@@ -7,26 +7,37 @@ from jax import tree_util as jtu
 
 ### ORTHOGONAL POLYNOMIALS ###
 # Nulls added for compatibility with Hermite scaling
-# Chebyshev (first kind)
-def state_T(x:jax.Array, null:float = 0) -> jax.Array:
-    """First two terms of three-term recurrence for Chebyshev 
-    polynomials of the first kind."""
+# Monomial
+def _state_M(x:jax.Array, null:float = 0) -> jax.Array:
+    """Three-term recurrence(?... Just designed to fit the same framework) for monomial basis"""
     return x, jnp.ones_like(x), x, 0.
 
-def ttr_T(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
-    """lax.scan-formatted three-term recurrence for Chebyshev
-    polynomials of the first kind."""
+def _ttr_M(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+    """lax.scan-formatted three-term recurrence for monomial basis."""
     x, T_im1, T_i, _ = state
     T_ip1 = 2 * x * T_i - T_im1
     return (x, T_i, T_ip1, 0.), T_ip1
 
+# Chebyshev (first kind)
+def _state_T(x:jax.Array, null:float = 0) -> jax.Array:
+    """First two terms of three-term recurrence for Chebyshev 
+    polynomials of the first kind."""
+    return x, jnp.ones_like(x), x, 0.
+
+def _ttr_T(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+    """lax.scan-formatted three-term recurrence for Chebyshev
+    polynomials of the first kind."""
+    x, M_im1, M_i, _ = state
+    M_ip1 = M_i * x
+    return (x, M_i, M_ip1, 0.), M_ip1
+
 # Chebyshev (second kind)
-def state_U(x:jax.Array, null:float = 0.) -> jax.Array:
+def _state_U(x:jax.Array, null:float = 0.) -> jax.Array:
     """lax.scan-formatted three-term recurrence for Chebyshev
     polynomials of the second kind."""
     return x, jnp.ones_like(x), 2 * x, 0.
 
-def ttr_U(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+def _ttr_U(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for Chebyshev
     polynomials of the second kind."""
     x, U_im1, U_i, _ = state
@@ -34,12 +45,12 @@ def ttr_U(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], j
     return (x, U_i, U_ip1, 0.), U_ip1
 
 # Legendre 
-def state_P(x:jax.Array, null:float = 0.) -> jax.Array:
+def _state_P(x:jax.Array, null:float = 0.) -> jax.Array:
     """First two terms of the three-term recurrence for Legendre
     polynomials. """
     return x, jnp.ones_like(x), x, 0.
 
-def ttr_P(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+def _ttr_P(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for Legendre
     polynomials."""
     x, P_im1, P_i, _ = state
@@ -47,12 +58,12 @@ def ttr_P(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], j
     return (x, P_i, P_ip1, 0.), P_ip1
 
 # Hermite
-def state_H(x:jax.Array, alpha:float = 1) -> jax.Array:
+def _state_H(x:jax.Array, alpha:float = 1) -> jax.Array:
     """First two terms of the three-term recurrence for generalized Hermite
     polynomials. """
     return x, jnp.ones_like(x), x / jnp.sqrt(alpha), alpha
 
-def ttr_H(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+def _ttr_H(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for generalized Hermite
     polynomials."""
     x, H_im1, H_i, alpha = state
@@ -64,17 +75,20 @@ def scale_ones(x):
     return 2 * (x - x.min(axis = 0)) / (x.max(axis = 0) - x.min(axis = 0)) - 1
 
 # Dictionary for all bases
-psi_dict = {'T': {'state': state_T,
-                  'ttr': ttr_T,
+psi_dict = {'M': {'state': _state_M,
+                  'ttr': _ttr_M,
+                  'scale': lambda x: x},
+            'T': {'state': _state_T,
+                  'ttr': _ttr_T,
                   'scale': scale_ones},
-            'U': {'state': state_U,
-                  'ttr': ttr_U,
+            'U': {'state': _state_U,
+                  'ttr': _ttr_U,
                   'scale': scale_ones},
-            'P': {'state': state_P,
-                  'ttr': ttr_P,
+            'P': {'state': _state_P,
+                  'ttr': _ttr_P,
                   'scale': scale_ones},
-            'H': {'state': state_H,
-                  'ttr': ttr_H,
+            'H': {'state': _state_H,
+                  'ttr': _ttr_H,
                   'scale': lambda x: x}}
 
 # Univariate orthogonal polynomial collection
@@ -88,7 +102,7 @@ def uv_psi(x:jax.Array, basis:str, k_exc:int, alpha:float = 1.) -> jax.Array:
     x : jax.Array
         Input points at which to evaluate the polynomials.
     basis : str
-        Polynomial basis type. Must be one of 'T' (Chebyshev 1st kind), 
+        Polynomial basis type. Must be one of 'M' (Monomial), 'T' (Chebyshev 1st kind), 
         'U' (Chebyshev 2nd kind), 'P' (Legendre), or 'H' (Hermite).
     k_exc : int
         Number of polynomial orders to generate (exclusive upper bound).
@@ -117,19 +131,19 @@ def uv_psi(x:jax.Array, basis:str, k_exc:int, alpha:float = 1.) -> jax.Array:
     return y.T
 
 # Multivariate Orthopoly
-def mv_psi(X:jax.Array, basis:str, k_total:int, alpha:jax.Array) -> jax.Array:
+def mv_psi(x:jax.Array, basis:str, k_exc:int, alpha:jax.Array) -> jax.Array:
     """
     Generates a collection of multivariate orthogonal polynomials evaluated at points X.
 
     Parameters
     ----------
-    X : jax.Array
+    x : jax.Array
         Input points at which to evaluate the polynomials, shape (n, dim).
     basis : str
-        Polynomial basis type. Must be one of 'T' (Chebyshev 1st kind), 
+        Polynomial basis type. Must be one of 'M' (Monomial), 'T' (Chebyshev 1st kind), 
         'U' (Chebyshev 2nd kind), 'P' (Legendre), or 'H' (Hermite).
-    k_total : int
-        Maximum total polynomial order (sum of orders across dimensions).
+    k_exc : int
+        Maximum univariate polynomial order (exclusive).
     alpha : jax.Array
         For the Hermite basis, alpha controls std. This is different than merely stretching the 
         polynomials. Must of shape (dim,). 
@@ -137,36 +151,33 @@ def mv_psi(X:jax.Array, basis:str, k_total:int, alpha:jax.Array) -> jax.Array:
     Returns
     -------
     jax.Array
-        Array of shape (n, num_terms) containing the evaluated multivariate polynomials at X,
-        where num_terms is the number of multi-indices with sum <= k_total.
+        Array of shape (n, k_exc ** dim).
     """
 
-    n, dim = X.shape
+    n, dim = x.shape
     # Domain inference
     scale_fn = psi_dict[basis]['scale']
-    X_scaled = scale_fn(X)
+    X_scaled = scale_fn(x)
 
     alpha = jnp.atleast_1d(alpha)
     alpha = jnp.broadcast_to(alpha, (dim,))
 
-    # Generate univariate polynomials for each dimension of shape (dim, n, k_total + 1)
+    # Generate univariate polynomials for each dimension of shape (dim, n, k_exc)
     # Lambda fn for easy vmap
-    uv_psi_partial = jtu.Partial(uv_psi, basis = basis, k_exc = k_total + 1)
+    uv_psi_partial = jtu.Partial(uv_psi, basis = basis, k_exc = k_exc)
     Y = jax.vmap(lambda X_scaled, alpha: uv_psi_partial(X_scaled, alpha = alpha), in_axes = (1, 0), out_axes = 1)(X_scaled, alpha)
     
-    # Multiplication indices
-    j = jnp.stack(jnp.meshgrid(*[jnp.arange(k_total)] * dim), axis = -1).reshape((k_total) ** dim, dim)
-    j = j[j.sum(axis = 1) <= k_total]
-    i = jnp.stack([jnp.arange(dim)] * j.shape[0])
-    
-    # Take product and return
+
+    j = jnp.indices((k_exc,) * dim).reshape(dim, -1).T
+    i = jnp.broadcast_to(jnp.arange(dim), j.shape)
+
     Y = jnp.prod(Y[:, i, j], axis = -1)
 
     return Y
 
 # Matrix Orthopoly
 # Only using Chebyshev First Kind
-def state_mat(A:jax.Array, B:jax.Array) -> jax.Array:
+def _state_mat(A:jax.Array, B:jax.Array) -> jax.Array:
     """First two terms of three-term recurrence for Chebyshev matrix
     polynomials of the first kind evaluated using A with B as the first term.
 
@@ -185,7 +196,7 @@ def state_mat(A:jax.Array, B:jax.Array) -> jax.Array:
 
     return A, A @ B, B
 
-def ttr_mat(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+def _ttr_mat(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for Chebyshev matrix
     polynomials of the first kind.
 
@@ -208,61 +219,34 @@ def ttr_mat(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array],
     T_ip1 = 2 * A @ T_i - T_im1
     return (A, T_ip1, T_i), T_ip1
 
-# Scale spectrum to [-1, 1]
-def scale_spectrum(A:jax.Array, 
-                    max_iter:int = 50,
-                    tol:float = 1e-4, 
-                    key:jax.Array = jrnd.key(0)):
-    """Scale the spectrum of a PSD symmetric matrix to ~[-1, 1].
-
-    Parameters
-    ----------
-    A : jax.Array
-        The input positive semi-definite (PSD) symmetric matrix to be scaled.
-    max_iter : int, optional
-        Maximum number of iterations for the power iteration method (default is 50).
-    tol : float, optional
-        Tolerance for convergence in the power iteration (default is 1e-4).
-    key : jax.Array, optional
-        Random key for initial vector (default is jrnd.key(0)).
-
-    Returns
-    -------
-    tuple[jax.Array, float]
-        A tuple containing the scaled matrix (with spectrum approximately in [-1, 1]) 
-        and the estimated upper bound of the maximum eigenvalue.
-    """
+def _scale_spectrum(A: jax.Array, 
+                            max_iter: int = 50,
+                            tol: float = 1e-4, 
+                            key: jax.Array = jrnd.key(0)):
     n = A.shape[0]
 
-    # Power iteration for maximum eigenvalue
     def pow_cond(state):
         b_i, b_im1, i = state
-        lmda_ceil = (b_im1 @ b_i)
-        conv_cond = jnpla.norm(b_i - lmda_ceil * b_im1) > tol
-        max_cond = i < max_iter
-        return jnp.logical_and(conv_cond, max_cond)
+        # Power iteration
+        conv_cond = jnpla.norm(b_i - (b_i @ b_im1) * b_im1) > tol
+        return jnp.logical_and(conv_cond, i < max_iter)
     
     def pow_iter(state):
-        b_i, b_im1, i = state
-        b_ip1 = A @ b_i
-        b_ip1 = b_ip1 / jnpla.norm(b_ip1)
-        return b_ip1, b_i, i + 1
+        b_i, _, i = state
+        b_next = A @ b_i
+        return b_next / jnpla.norm(b_next), b_i, i + 1
     
-    # Initial state
-    b0 = jrnd.ball(key, d = n, p = 1)
-    b1 = A @ b0
-    b1 = b1 / jnpla.norm(b1)
-    # Scale both vectors
-    # Keep the last two
-    bf, b_fm1, _ = lax.while_loop(pow_cond, pow_iter, (b1, b0, 0))
-    # Calculate the maximum eigenvalue...
-    lmda_ceil = bf.T @ A @ bf
-    rem = jnpla.norm(A @ bf - lmda_ceil * bf)
-    # And add remainder to get a definite upper bound
-    lmda_ceil = lmda_ceil + rem
+    b0 = jrnd.normal(key, (n,))
+    b0 = b0 / jnpla.norm(b0)
+    bf, _, _ = lax.while_loop(pow_cond, pow_iter, (b0, b0, 0))
 
-    # Return the scaled matrix
-    return (2 * A / lmda_ceil) - jnp.eye(n), lmda_ceil
+    # Rayleigh quotient
+    rho_est = jnp.abs(bf.T @ A @ bf)
+    # Add eps
+    rho_ceil = rho_est * 1.01
+
+    # Map [ -rho_ceil, rho_ceil ] to [ -1, 1 ]
+    return A / rho_ceil, rho_ceil
 
 # Block Krylov for Chebyshev Matrix Polynomials
 def mat_psi(A:jax.Array, Omega:jax.Array, k_exc:int):
@@ -291,22 +275,22 @@ def mat_psi(A:jax.Array, Omega:jax.Array, k_exc:int):
         from order 0 up to k_exc - 1.
     """
     # Polynomial generation and return
-    init_state = state_mat(A, Omega)
+    init_state = _state_mat(A, Omega)
     # Right now, y is poly ranging from [2, q-1]
-    _, y = lax.scan(ttr_mat, init_state, jnp.arange(k_exc - 2))
+    _, y = lax.scan(_ttr_mat, init_state, jnp.arange(k_exc - 2))
     # Add the initial state onto the front (zeroth and first terms)
     y = jnp.concatenate([init_state[-1][None], init_state[-2][None], y], axis = 0)
 
     # Transpose to shape (n, m, q)
     return y.transpose(1, 0, 2)
 
-def rBK(A:jax.Array, n_eigs:int, 
+def rBK(A:jax.Array, n_eigs:int, m_os:float,
     k_exc:int,
     max_iter:int = 50,
     tol:float = 1e-8,
     key:jax.Array = jrnd.key(0)):
     """
-    Randomized block-Krylov method for computing the top n_eigs eigenpairs of a symmetric positive semidefinite matrix 
+    Randomized Block-Krylov method for computing the top n_eigs eigenpairs of a symmetric positive semidefinite matrix 
     using Chebyshev polynomial. We scale the spectrum of the input matrix; randomly sample its columns; produce a block Krylov basis
     for the random sample; orthogonalize the basis; apply it to the input matrix; and extract its eigenvalue and eigenvetors.
 
@@ -316,6 +300,8 @@ def rBK(A:jax.Array, n_eigs:int,
         Symmetric positive semidefinite matrix of shape (n, n).
     n_eigs : int
         Number of top eigenvalues and eigenvectors to compute.
+    m_os : int
+        Oversampling factor.
     k : int
         Degree of the Chebyshev polynomial used in the Krylov subspace construction.
     max_iter : int, optional
@@ -342,16 +328,16 @@ def rBK(A:jax.Array, n_eigs:int,
     """
     keys = jrnd.split(key, 2)
     n = A.shape[0]
-    A0 = A
+    n_os = int(n_eigs * (1 + m_os))
 
     # Scale spectrum to (-1, 1)
-    A, lmda_ceil = scale_spectrum(A, 
+    A, rho_ceil = _scale_spectrum(A, 
                   max_iter, 
                   tol, 
                   keys[0])
 
     # Random matrix
-    Omega = jrnd.normal(keys[1], (n, n_eigs))
+    Omega = jrnd.normal(keys[1], (n, n_os))
 
     # Build orthogonalized Krylov basis
     Q = mat_psi(A, Omega, k_exc).reshape(n, -1)
@@ -362,13 +348,12 @@ def rBK(A:jax.Array, n_eigs:int,
     M = Q.T @ A @ Q
 
     # Extract eigs
-    lmda, U = jnpla.eigh(M)
+    lmda, U = jnpla.eig(M)
     # Rescale after scaling for Chebyshev filter
-    lmda = (lmda + 1) * (lmda_ceil / 2)
+    lmda.real = lmda * rho_ceil
     # Lift eigenvectors back to original subspace
     V = Q @ U
 
     # Truncate oversampled results
-    trunc = n_eigs * (q - 1)
-    lmda, V = lmda[trunc:], V[:, trunc:]
+    lmda, V = lmda[:n_eigs], V[:, :n_eigs]
     return lmda, V

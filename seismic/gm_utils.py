@@ -182,7 +182,7 @@ class Fault:
     def tree_unflatten(cls, aux, children):
         return cls(*children)
 
-def make_fault_tree(*faults):
+def make_fault_tree(faults):
     return jt.map(lambda *xs: jnp.stack(xs), *faults)
 
 # Distances...
@@ -301,25 +301,9 @@ class Scenario:
     def calc_fault_num(self):
         return self.fault_tree()
     
-    def calc_R_jb(self):
-        R_jbs = jax.vmap(jtu.Partial(calc_R_jb, self.site))(self.fault_tree)
-        return R_jbs
-    
-    def calc_R_rup(self):
-        R_rups = jax.vmap(jtu.Partial(calc_R_rup, self.site))(self.fault_tree)
-        return R_rups
-    
-    def calc_R_epi(self):
-        R_epis = jax.vmap(jtu.Partial(calc_R_epi, self.site))(self.fault_tree)
-        return R_epis
-    
-    def calc_R_hyp(self):
-        R_hyps = jax.vmap(jtu.Partial(calc_R_hyp, self.site))(self.fault_tree)
-        return R_hyps
-
-    def calc_R_x(self):
-        R_xs = jax.vmap(jtu.Partial(calc_R_x, self.site))(self.fault_tree)
-        return R_xs
+    def calc_R(self):
+        R = jax.vmap(jtu.Partial(calc_R, self.site))(self.fault_tree)
+        return R
     
     def tree_flatten(self):
         return (self.site, self.fault_tree), None
@@ -346,8 +330,7 @@ class GMMLT:
     def tree_unflatten(cls, aux, children):
         return cls(aux, *children)
 
-def calc_haz(x:float, M_min:float, gmms:GMMLT, scn:Scenario, dM:float = 0.1):
-    fault_num = scn.fault_tree.x.shape[0]
+def calc_haz(x:float, gmmlt:GMMLT, scn:Scenario, dM:float = 0.1):
     M_min, M_max = scn.fault_tree.mfd.M_min, scn.fault_tree.mfd.M_max
 
     # Magnitude bins.
@@ -369,13 +352,14 @@ def calc_haz(x:float, M_min:float, gmms:GMMLT, scn:Scenario, dM:float = 0.1):
     # Calculate R for full fault tree...
     R_tree = jax.vmap(calc_R, in_axes = (None, 0))(scn.site, scn.fault_tree)
     # Triple vmap. First, across faults (and corresponding distances),
-    calc_faults = jax.vmap(gmms.calc_single, in_axes=(None, None, None, 0, 0))
+    calc_faults = jax.vmap(gmmlt.calc_single, in_axes=(None, None, None, 0, 0))
     # Then across magnitudes,
     calc_M = jax.vmap(calc_faults, in_axes=(None, 0, None, None, None))
     # Then across GMMs. This order minimizes recompilation.
     calc_gmms = jax.vmap(calc_M, in_axes=(0, None, None, None, None))
+
     # Grab indices and vmap across
-    gmm_idcs = jnp.arange(len(gmms.gmms))
+    gmm_idcs = jnp.arange(len(gmmlt.gmms))
     all_mu_lnSA, all_std_lnSA = calc_gmms(gmm_idcs, roots_M, scn.site, scn.fault_tree, R_tree)
     # Get PoE at all points
     all_prob_x = 1 - trunc_norm_cdf(jnp.log(x), 
@@ -383,7 +367,7 @@ def calc_haz(x:float, M_min:float, gmms:GMMLT, scn:Scenario, dM:float = 0.1):
                                     loc = all_mu_lnSA, scale = all_std_lnSA)
 
     # Take mean
-    mu_prob_x = jnp.einsum('i,ijk->jk', gmms.weights, all_prob_x)
+    mu_prob_x = jnp.einsum('i,ijk->jk', gmmlt.weights, all_prob_x)
 
     # Hazard integrand (magnitude probabilities * exceedance probabilities)
     haz_intgrnd = mu_prob_x * n_M_inc

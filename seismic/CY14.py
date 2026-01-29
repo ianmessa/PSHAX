@@ -7,11 +7,12 @@ from jax.typing import ArrayLike
 import polars as pl 
 from importlib.resources import files
 
-from .gm_utils import *
+from seismic.gm_utils import *
 
 gmc = pl.read_csv(files("seismic") / "CY14_coeffs.csv")
 gmc[-2, 'T'] = -1.
 gmc[-1, 'T'] = -2.
+gmc = gmc.with_columns([pl.col("T").cast(pl.Float64)])
 gmc = gmc.sort('T')
 gmc_col = gmc.columns
 gmc_df = gmc
@@ -49,7 +50,8 @@ c9_all = jnp.pad(c9_all, ((0, c_max_shape - c9_all.shape[0]), (0, 0)))
 c11_all = gmc[24:26]
 c11_all = jnp.insert(c11_all, 1, empty_all, axis = 0)
 c11_all = jnp.pad(c11_all, ((0, c_max_shape - c11_all.shape[0]), (0, 0)))
-c_all = jnp.stack([c1_all, c2_all, c3_all, c4_all, c5_all, c6_all, c7_all, c8_all, c9_all, c11_all])
+c_all = jnp.stack([jnp.zeros_like(c1_all), c1_all, c2_all, c3_all, c4_all, c5_all, c6_all, c7_all, c8_all, c9_all, c11_all])
+
 # c_gamma, phi, tau, sigma
 c_gamma_all = jnp.insert(gmc[26:29], 0, empty_all, axis = 0)
 c_phi_all = jnp.insert(gmc[29:35], 0, empty_all, axis = 0)
@@ -85,23 +87,27 @@ def f_SA_ref(Mw, dip, z_tor, SOF_flag,  R_jb, R_rup, R_x,
     gamma = c_gamma[1] + c_gamma[2] / jnp.cosh(jnp.maximum(Mw - c_gamma[3], 0.))
     r3 = (c[4, 1] - c[4, 0]) * jnp.log(jnp.sqrt(R_rup ** 2 + c_RB ** 2)) + R_rup * gamma
 
-    cosh_Mw = jnp.cosh(2 * jnp.maximum(Mw - c_gamma[3], 0.))
+    cosh_Mw = jnp.cosh(2 * jnp.maximum(Mw - 4.5, 0.))
     cos_dip = jnp.cos(dip_rad)
 
     # Calculate Mw_z_tor (separate fn in nshmp-haz)
-    is_rev = SOF_flag == -1.
+    # REVIEW Mw_Z_TOP
     Mw_z_tor_rev = lambda Mw: jnp.clip(2.704 - 1.226 *(Mw - 5.849) , min = 0., max = 2.704)
     Mw_z_tor_else = lambda Mw: jnp.clip(2.673 - 1.136 *(Mw - 4.970) , min = 0., max = 2.673)
-    Mw_z_tor = lax.cond(is_rev, Mw_z_tor_rev, Mw_z_tor_else, Mw)
+    Mw_z_tor = lax.cond(SOF_flag == -1, Mw_z_tor_rev, Mw_z_tor_else, Mw)
+    dz_tor = z_tor - Mw_z_tor ** 2
 
-    dz_tor = z_tor - Mw_z_tor
-
-    r4 = ((c[7, 0] + c[7, 2]) * dz_tor + (c[11, 0] + c[11, 2]) * cos_dip ** 2) / cosh_Mw
+    r4 = ((c[7, 0] + c[7, 2] / cosh_Mw) * dz_tor + (c[11, 0] + c[11, 2] / cosh_Mw) * cos_dip ** 2)
+    # Multiply by abs value of flag to account for strike slip where additional factor is zero
+    c_style1, c_style2 = lax.select(SOF_flag == -1, c[1, 1:4:2], c[1, 2:5:2]) * jnp.abs(SOF_flag)
+    r4 = r4 + (c_style1 + c_style2 / cosh_Mw)
+    
     r5_cond = R_x >= 0.
-    r5 = c[9, 0] * jnp.cos(dip_rad) * \
-        (c[9, 1] + (1 - c[9, 1]) * jnp.tanh(R_x / c[9, 2])) * \
-        (1 - jnp.sqrt(R_jb ** 2 + z_tor ** 2) / (R_rup + 1.))
-    r5 = jnp.where(r5_cond, r5, 0.)
+    r5_true = lambda R_x, R_jb, z_tor: c[9, 0] * jnp.cos(dip_rad) * \
+                    (c[9, 1] + (1 - c[9, 1]) * jnp.tanh(R_x / c[9, 2])) * \
+                    (1 - jnp.sqrt(R_jb ** 2 + z_tor ** 2) / (R_rup + 1.))
+    r5_false = lambda R_x, R_jb, z_tor: jnp.zeros_like(c_n)
+    r5 = lax.cond(r5_cond, r5_true, r5_false, R_x, R_jb, z_tor)
     
     return jnp.exp(r1 + r2 + r3 + r4 + r5)
 
@@ -129,10 +135,10 @@ def f_std(Mw, vs30inf_flag, SA_ref, soil_nonlin,
     vs_term = jnp.where(vs30inf_flag == 1., c_sigma[3], 0.7)
     sig_nonlin_0 = sig_nonlin_0 * jnp.sqrt(vs_term + nonlin_0sq)
 
-    return (tau ** 2 * nonlin_0sq + sig_nonlin_0 ** 2)
+    return jnp.sqrt(tau ** 2 * nonlin_0sq + sig_nonlin_0 ** 2)
 
 def f_CY14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array,):
-    T_slice, c, c_gamma, c_phi, c_tau, c_other, c_sigma = slice_coeffs(T)
+    T_slice, c, c_gamma, c_phi, c_tau, c_sigma, c_other = slice_coeffs(T)
 
     SOF_flag = fault.calc_SOF_flag()
     R_jb, R_rup, R_epi, R_hyp, R_x = R
