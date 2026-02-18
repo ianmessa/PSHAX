@@ -14,9 +14,9 @@ def _state_M(x:jax.Array, null:float = 0) -> jax.Array:
 
 def _ttr_M(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for monomial basis."""
-    x, T_im1, T_i, _ = state
-    T_ip1 = 2 * x * T_i - T_im1
-    return (x, T_i, T_ip1, 0.), T_ip1
+    x, M_im1, M_i, _ = state
+    M_ip1 = M_i * x
+    return (x, M_i, M_ip1, 0.), M_ip1
 
 # Chebyshev (first kind)
 def _state_T(x:jax.Array, null:float = 0) -> jax.Array:
@@ -27,9 +27,10 @@ def _state_T(x:jax.Array, null:float = 0) -> jax.Array:
 def _ttr_T(state:tuple, i:int) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
     """lax.scan-formatted three-term recurrence for Chebyshev
     polynomials of the first kind."""
-    x, M_im1, M_i, _ = state
-    M_ip1 = M_i * x
-    return (x, M_i, M_ip1, 0.), M_ip1
+    x, T_im1, T_i, _ = state
+    T_ip1 = 2 * x * T_i - T_im1
+    return (x, T_i, T_ip1, 0.), T_ip1
+    
 
 # Chebyshev (second kind)
 def _state_U(x:jax.Array, null:float = 0.) -> jax.Array:
@@ -130,8 +131,25 @@ def uv_psi(x:jax.Array, basis:str, k_exc:int, alpha:float = 1.) -> jax.Array:
 
     return y.T
 
+def _summask(j, k_max, q):
+    return j.sum(axis = -1) <= k_max
+def _prodmask(j, k_max, q):
+    return jnp.prod(j, axis = -1) <= k_max
+def _hbmask(j, k_max, q):
+    return jnp.power(j, q).sum(axis = -1) ** (1 / q) <= k_max
+
+_strategies = [_summask, _prodmask, _hbmask]
+_strategy_idcs = {'sum':0, 'prod':1, 'hyperbolic':2}
+
+def _trunc_mask(j:jax.Array, k_max:int, strategy:str = 'sum', q:float = 0.625):
+    strategy_idx = _strategy_idcs[strategy]
+    mask = lax.switch(strategy_idx, _strategies, j, k_max, q)
+    return mask
+
 # Multivariate Orthopoly
-def mv_psi(x:jax.Array, basis:str, k_exc:int, alpha:jax.Array) -> jax.Array:
+def mv_psi(x:jax.Array, basis:str, 
+           k_max:int, strategy:str = 'sum', q:float = 0.75,
+           alpha:float | jax.Array = 0.) -> jax.Array:
     """
     Generates a collection of multivariate orthogonal polynomials evaluated at points X.
 
@@ -142,11 +160,15 @@ def mv_psi(x:jax.Array, basis:str, k_exc:int, alpha:jax.Array) -> jax.Array:
     basis : str
         Polynomial basis type. Must be one of 'M' (Monomial), 'T' (Chebyshev 1st kind), 
         'U' (Chebyshev 2nd kind), 'P' (Legendre), or 'H' (Hermite).
-    k_exc : int
-        Maximum univariate polynomial order (exclusive).
-    alpha : jax.Array
+    k_max : int
+        Maximum polynomial order depending on truncation strategy.
+    strategy : str
+        Max-sum/max-product/hyperbolic truncation; the last one uses q.
+    q : float
+        Power for hyperbolic truncation
+    alpha : FLOAT | jax.Array
         For the Hermite basis, alpha controls std. This is different than merely stretching the 
-        polynomials. Must of shape (dim,). 
+        polynomials. Must broadcastable to shape (dim,). 
 
     Returns
     -------
@@ -155,6 +177,7 @@ def mv_psi(x:jax.Array, basis:str, k_exc:int, alpha:jax.Array) -> jax.Array:
     """
 
     n, dim = x.shape
+    alpha = jnp.broadcast_to(alpha, (dim,))
     # Domain inference
     scale_fn = psi_dict[basis]['scale']
     X_scaled = scale_fn(x)
@@ -164,12 +187,14 @@ def mv_psi(x:jax.Array, basis:str, k_exc:int, alpha:jax.Array) -> jax.Array:
 
     # Generate univariate polynomials for each dimension of shape (dim, n, k_exc)
     # Lambda fn for easy vmap
-    uv_psi_partial = jtu.Partial(uv_psi, basis = basis, k_exc = k_exc)
+    uv_psi_partial = jtu.Partial(uv_psi, basis = basis, k_exc = k_max + 1)
     Y = jax.vmap(lambda X_scaled, alpha: uv_psi_partial(X_scaled, alpha = alpha), in_axes = (1, 0), out_axes = 1)(X_scaled, alpha)
     
 
-    j = jnp.indices((k_exc,) * dim).reshape(dim, -1).T
+    j = jnp.indices((k_max,) * dim).reshape(dim, -1).T
     i = jnp.broadcast_to(jnp.arange(dim), j.shape)
+    mask = _trunc_mask(j, k_max, strategy, q)
+    i,j = i[mask], j[mask]
 
     Y = jnp.prod(Y[:, i, j], axis = -1)
 
@@ -328,7 +353,7 @@ def rBK(A:jax.Array, n_eigs:int, m_os:float,
     """
     keys = jrnd.split(key, 2)
     n = A.shape[0]
-    n_os = int(n_eigs * (1 + m_os))
+    n_os = int(n_eigs * (m_os))
 
     # Scale spectrum to (-1, 1)
     A, rho_ceil = _scale_spectrum(A, 
@@ -350,7 +375,7 @@ def rBK(A:jax.Array, n_eigs:int, m_os:float,
     # Extract eigs
     lmda, U = jnpla.eig(M)
     # Rescale after scaling for Chebyshev filter
-    lmda.real = lmda * rho_ceil
+    lmda = lmda.real * rho_ceil
     # Lift eigenvectors back to original subspace
     V = Q @ U
 

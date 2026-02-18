@@ -6,7 +6,7 @@ from jax import random as jrnd
 
 import polars as pl
 from pathlib import Path
-
+# FROM https://people.sc.fsu.edu/~jburkardt/py_src/sobol/sobol.html
 # Setup
 sobol_1111_path = Path(__file__).parent / "sobol_1111.tsv"
 dir_nums = pl.read_csv(sobol_1111_path, separator = '\t', has_header = False).to_jax()

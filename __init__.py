@@ -1,4 +1,5 @@
+import os
 import jax
-jax.config.update("jax_enable_x64", True)
-import numerics
-import seismic
+if os.environ.get("JAX_ENABLE_X64") is None:
+    jax.config.update("jax_enable_x64", True)
+from . import numerics, seismic
