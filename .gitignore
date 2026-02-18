@@ -1,9 +1,33 @@
+# --- Your Specific Files ---
 *.xls
-*.m.txt
 *.xlsx
 *.pyc
 *.txt
 *.pdf
 *.docx
 *.pptx
-sources/*
+Paper/
+slides/
+*.m.txt
+
+# --- LaTeX Essential Ignores ---
+*.aux
+*.log
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.out
+*.blg
+*.bbl
+*.nav
+*.snm
+*.vrb
+*.run.xml
+*.bcf
+
+# --- OS/Editor Junk ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
