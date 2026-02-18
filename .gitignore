@@ -6,6 +6,8 @@
 *.pdf
 *.docx
 *.pptx
+*.json
+src/.VSCodeCounter/*
 Paper/
 slides/
 *.m.txt
