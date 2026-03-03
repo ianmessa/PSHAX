@@ -5,7 +5,7 @@ from jax import numpy as jnp
 import polars as pl
 from importlib.resources import files
 
-from .gm_utils import *
+from .seismic_utils import *
 
 gmc = pl.read_csv(files("seismic") / "CB14_coeffs.csv")
 gmc[-2, 'T'] = -1.
@@ -164,7 +164,7 @@ def f_sig(Mw, vs30, pga_rock,
     phi = (phi_lnyB ** 2 + phi_lnAF ** 2 + alpha ** 2 * phi_lnPGAB ** 2 + 2 * alpha * rho * phi_lnyB * phi_lnPGAB)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_CB14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
+def gmm_CB14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
     T_slice, c, k, HW_coeffs, site_coeffs, attn_coeffs, sigma_coeffs = slice_coeffs(T)
 
     SOF_flag = fault.calc_SOF_flag()

@@ -7,7 +7,7 @@ from jax.typing import ArrayLike
 import polars as pl 
 from importlib.resources import files
 
-from seismic.gm_utils import *
+from seismic.seismic_utils import *
 
 gmc = pl.read_csv(files("seismic") / "CY14_coeffs.csv")
 gmc[-2, 'T'] = -1.
@@ -137,7 +137,7 @@ def f_std(Mw, vs30inf_flag, SA_ref, soil_nonlin,
 
     return jnp.sqrt(tau ** 2 * nonlin_0sq + sig_nonlin_0 ** 2)
 
-def f_CY14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array,):
+def gmm_CY14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array,):
     T_slice, c, c_gamma, c_phi, c_tau, c_sigma, c_other = slice_coeffs(T)
 
     SOF_flag = fault.calc_SOF_flag()

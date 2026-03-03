@@ -138,17 +138,29 @@ def _prodmask(j, k_max, q):
 def _hbmask(j, k_max, q):
     return jnp.power(j, q).sum(axis = -1) ** (1 / q) <= k_max
 
+def _combomask(j):
+    j_unique = jnp.unique(jnp.sort(j, axis = -1), axis = 0, size = j.shape[0], fill_value = j.max() + 1)
+    return jnp.all(jnp.isin(j_unique, j), axis = -1)
+def _permmask(j):
+    return jnp.ones(j.shape[0], dtype = bool)
+
 _strategies = [_summask, _prodmask, _hbmask]
 _strategy_idcs = {'sum':0, 'prod':1, 'hyperbolic':2}
 
-def _trunc_mask(j:jax.Array, k_max:int, strategy:str = 'sum', q:float = 0.625):
+def _trunc_mask(j:jax.Array, 
+                k_max:int, strategy:str = 'sum', 
+                order_matters:bool = True,
+                q:float = 0.625):
     strategy_idx = _strategy_idcs[strategy]
-    mask = lax.switch(strategy_idx, _strategies, j, k_max, q)
+    strat_mask = lax.switch(strategy_idx, _strategies, j, k_max, q)
+    order_mask = lax.cond(order_matters, _permmask, _combomask, j)
+    mask = jnp.logical_and(strat_mask, order_mask)
     return mask
 
 # Multivariate Orthopoly
 def mv_psi(x:jax.Array, basis:str, 
            k_max:int, strategy:str = 'sum', q:float = 0.75,
+           order_matters:bool = True,
            alpha:float | jax.Array = 0.) -> jax.Array:
     """
     Generates a collection of multivariate orthogonal polynomials evaluated at points X.
@@ -190,11 +202,10 @@ def mv_psi(x:jax.Array, basis:str,
     uv_psi_partial = jtu.Partial(uv_psi, basis = basis, k_exc = k_max + 1)
     Y = jax.vmap(lambda X_scaled, alpha: uv_psi_partial(X_scaled, alpha = alpha), in_axes = (1, 0), out_axes = 1)(X_scaled, alpha)
     
-
     j = jnp.indices((k_max,) * dim).reshape(dim, -1).T
     i = jnp.broadcast_to(jnp.arange(dim), j.shape)
-    mask = _trunc_mask(j, k_max, strategy, q)
-    i,j = i[mask], j[mask]
+    mask = _trunc_mask(j, k_max, strategy, order_matters, q)
+    i, j = i[mask], j[mask]
 
     Y = jnp.prod(Y[:, i, j], axis = -1)
 
@@ -274,7 +285,7 @@ def _scale_spectrum(A: jax.Array,
     return A / rho_ceil, rho_ceil
 
 # Block Krylov for Chebyshev Matrix Polynomials
-def mat_psi(A:jax.Array, Omega:jax.Array, k_exc:int):
+def _mat_psi(A:jax.Array, Omega:jax.Array, k_exc:int):
     """
     Generates a collection of univariate orthogonal polynomials evaluated at points x.
 
@@ -365,7 +376,7 @@ def rBK(A:jax.Array, n_eigs:int, m_os:float,
     Omega = jrnd.normal(keys[1], (n, n_os))
 
     # Build orthogonalized Krylov basis
-    Q = mat_psi(A, Omega, k_exc).reshape(n, -1)
+    Q = _mat_psi(A, Omega, k_exc).reshape(n, -1)
     Q, _ = jnpla.qr(Q)
 
     # Drop A to orthogonal basis

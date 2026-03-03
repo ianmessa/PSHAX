@@ -6,7 +6,7 @@ from jax import numpy as jnp
 import polars as pl
 from importlib.resources import files
 
-from .gm_utils import *
+from .seismic_utils import *
 
 gmc = pl.read_csv(files("seismic") / "Idriss14_coeffs.csv")
 gmc[-1, 'T'] = -1.
@@ -56,7 +56,7 @@ def f_lnSA(Mw, R_rup, vs30, RV_flag, a, b, xi, gamma, phi):
 def f_sigma(Mw, T):
     return 1.18 + 0.035 * jnp.log(T) - 0.06 * Mw
 
-def f_Idriss14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array): 
+def gmm_Idriss14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array): 
     T_slice, a, b, xi, gamma, phi = slice_coeffs(T)
 
     SOF_flag = fault.calc_SOF_flag()

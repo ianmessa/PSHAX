@@ -5,7 +5,7 @@ from jax import numpy as jnp
 import polars as pl
 from importlib.resources import files
 
-from .gm_utils import *
+from .seismic_utils import *
 
 gmc = pl.read_csv(files("seismic") / "BSSA14_coeffs.csv")
 
@@ -54,7 +54,7 @@ def slice_coeffs(T):
     return (T_slice, (e, Mh), (c, M_ref, R_ref, Dc3CaTw), (F, vc, c_lin, v_ref), h, (tau1, tau2, phi1, phi2, dPhi_R, dPhi_v, R1, R2, v1, v2))
 
 # Source term
-def f_source(Mw, SOF_flag, source_coeffs):
+def _f_source(Mw, SOF_flag, source_coeffs):
     e, Mh = source_coeffs
     rv_filt = SOF_flag == -1
     ss_filt = SOF_flag == 0
@@ -64,12 +64,12 @@ def f_source(Mw, SOF_flag, source_coeffs):
     e_addn = jnp.where(MwMh <= 0, e[4] * MwMh + e[5] * MwMh ** 2, e[6] * MwMh)
     return e_SOF + e_addn
 
-def f_path(Mw, R, path_coeffs):
+def _f_path(Mw, R, path_coeffs):
     c, M_ref, R_ref, Dc3CaTw = path_coeffs
     return jnp.log(R / R_ref) * (c[1] + c[2] * (Mw - M_ref)) + (c[3] + Dc3CaTw) * (R - R_ref)
 
 # Site term
-def f_site(vs30, z1p0, PGA_rock, T, site_coeffs):
+def _f_site(vs30, z1p0, PGA_rock, T, site_coeffs):
     F, vc, c_lin, v_ref = site_coeffs
     vs_lin = jnp.clip(vs30, max = vc)
     ln_Flin = c_lin * jnp.log(vs_lin / v_ref)
@@ -90,7 +90,7 @@ def f_site(vs30, z1p0, PGA_rock, T, site_coeffs):
 
     return ln_Flin + ln_Fnl + F_dz1
 
-def f_lnSA(Mw, T, SOF_flag, 
+def _f_lnSA(Mw, T, SOF_flag, 
            vs30, z1p0, 
            R_jb, 
            source_coeffs,
@@ -99,13 +99,13 @@ def f_lnSA(Mw, T, SOF_flag,
            h):
     R = (R_jb ** 2 + h ** 2) ** (1 / 2)
     # Add index to select PGA?...
-    PGA_rock = jnp.exp(f_source(Mw, SOF_flag, source_coeffs) + f_path(Mw, R, path_coeffs))
+    PGA_rock = jnp.exp(_f_source(Mw, SOF_flag, source_coeffs) + _f_path(Mw, R, path_coeffs))
     
-    return f_source(Mw, SOF_flag, source_coeffs) + \
-           f_path(Mw, R, path_coeffs) + \
-           f_site(vs30, z1p0, PGA_rock, T, site_coeffs)
+    return _f_source(Mw, SOF_flag, source_coeffs) + \
+           _f_path(Mw, R, path_coeffs) + \
+           _f_site(vs30, z1p0, PGA_rock, T, site_coeffs)
 
-def f_sigma(Mw, vs30, R_jb,
+def _f_sigma(Mw, vs30, R_jb,
             sigma_coeffs):
     tau1, tau2, phi1, phi2, dPhi_R, dPhi_v, R1, R2, v1, v2 = sigma_coeffs
     tau = jnp.clip(tau1 + (tau2 - tau1) * (Mw - 4.5), 
@@ -124,15 +124,15 @@ def f_sigma(Mw, vs30, R_jb,
     phi = lax.select(filter_v, phi_v_mod, phi)
     return (tau ** 2 + phi ** 2) ** (1 / 2)
 
-def f_BSSA14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
+def gmm_BSSA14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
     T_slice, source_coeffs, path_coeffs, site_coeffs, h, sigma_coeffs = slice_coeffs(T)
 
     SOF_flag = fault.calc_SOF_flag()
     R_jb, R_rup, R_epi, R_hyp, R_x = R
 
-    lnSA = f_lnSA(Mw, T_slice, SOF_flag, site.vs30, site.z1p0, R_jb,
+    lnSA = _f_lnSA(Mw, T_slice, SOF_flag, site.vs30, site.z1p0, R_jb,
                   source_coeffs, path_coeffs, site_coeffs, h)
-    std = f_sigma(Mw, site.vs30, R_jb, 
+    std = _f_sigma(Mw, site.vs30, R_jb, 
                   sigma_coeffs)
     lnSA = jnp.interp(T, T_slice, lnSA)
     std = jnp.interp(T, T_slice, std)

@@ -47,7 +47,7 @@ def rbf_interpolator(x:jax.Array, y:jax.Array, k_phs:int, k_poly:int):
     x : jax.Array
         Array of interpolation centers with shape (n, d).
     y : jax.Array
-        Values at centers with shape (n,).
+        Values at centers with shape (n, c).
     k_phs : int
         Order of the polyharmonic spline.
     k_poly : int
@@ -68,14 +68,14 @@ def rbf_interpolator(x:jax.Array, y:jax.Array, k_phs:int, k_poly:int):
     Phi = phs_map(x, x, R, k_phs)
     # Build polynomial block + zero block in lower right
     alpha_poly = jnp.zeros(d)
-    poly = mv_psi(x, 'M', k_poly, alpha_poly)
+    poly = mv_psi(x, 'M', k_poly, alpha = alpha_poly)
     dk_poly = poly.shape[-1]
     zeros = jnp.zeros((dk_poly, dk_poly))
     # Put it all together
     Phi = jnp.block([[Phi, poly], 
                      [poly.T, zeros]])
     # Solve for y + zeros at tail
-    y_aug = jnp.concat([y, jnp.zeros(dk_poly)])
+    y_aug = jnp.concat([y, jnp.zeros((dk_poly, y.shape[-1]))])
     w_all = jnpla.solve(Phi, y_aug)
     w, lmda = w_all[:-dk_poly], w_all[-dk_poly:]
 
@@ -96,7 +96,7 @@ def rbf_interpolator(x:jax.Array, y:jax.Array, k_phs:int, k_poly:int):
         # Similar routine to above
         Ri = jnpla.norm(xi[:, None] - x[None], axis = -1)
         Phii = phs_map(xi, x, Ri, k_phs)
-        polyi = mv_psi(xi, 'M', k_poly, alpha_poly)
+        polyi = mv_psi(xi, 'M', k_poly, alpha = alpha_poly)
         return Phii @ w + polyi @ lmda
 
     return rbf_interpolate

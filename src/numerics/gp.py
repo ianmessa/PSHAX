@@ -2,7 +2,7 @@ import jax
 from jax import numpy as jnp 
 from jax.numpy import linalg as jnpla
 
-def C_Lacour(MlnR_all:jax.Array):
+def C_Lacour(MlnR_all:jax.Array, y_all:jax.Array):
     """
     Compute the correlation matrix using the kernel from Lacour & Abrahamson (2021) [DOI:10.1785/0120200381].
 
@@ -10,6 +10,8 @@ def C_Lacour(MlnR_all:jax.Array):
     ----------
     MlnR_all : jax.Array
         Array of shape (N, 2), where each row contains [M, lnR] pairs.
+    y_all : jax.Array
+        Array of values at input [M, lnR]. This argument is never used. Just kept so it works like the Paciorek kernel. 
 
     Returns
     -------

@@ -2,7 +2,7 @@ from jax import lax
 from jax.tree_util import Partial
 from jax import numpy as jnp
 
-from .gm_utils import *
+from .seismic_utils import *
 
 def f_epistemic(gmm, factor:float, Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
     lnSA, std = gmm(Mw, T, site, fault, R)
@@ -13,5 +13,5 @@ def f_epistemic(gmm, factor:float, Mw:float, T:float, site:Site, fault:Fault, R:
     delta_lnSA = factor * (sig_u + T_factor + SOF_factor)
     return lnSA + delta_lnSA, std
 
-def f_epistemic_AAY14(gmm, factor):
+def gmm_epi_AAY14(gmm, factor):
     return Partial(f_epistemic, gmm, factor)

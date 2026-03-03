@@ -6,7 +6,7 @@ from jax import numpy as jnp
 import polars as pl
 from importlib.resources import files
 
-from .gm_utils import *
+from .seismic_utils import *
 
 ##### GROUND MOTION COEFFICIENTS #####
 gmc = pl.read_csv(files("seismic") / "ASK14_coeffs.csv")
@@ -133,13 +133,13 @@ def f10(vs30, z1p0,
     z1p0_soil = z1p0_soil * jnp.log((z1p0 + 0.1) / (z1p0_ref + 0.1))
     return z1p0_soil
 
-def f_dAmp(vs30, SA_rock,
+def _f_dAmp(vs30, SA_rock,
            c_other):
     _, b, c, _, v_lin, _= c_other
     dAmp = (-b * SA_rock) / (SA_rock + c) + (b * SA_rock) / (SA_rock + c * (vs30 / v_lin) ** N)
     return jnp.where(vs30 >= v_lin, 0., dAmp)
 
-def f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
+def _f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
                    vs30, z1p0,
                    R_jb, R_rup, R_x,
                    a, c_other
@@ -163,10 +163,10 @@ def f_lnSA_SA_rock(Mw, width, dip, z_tor, SOF_flag,
 
     return lnSA, SA_rock
 
-def f_sigma(Mw, vs30, vs30inf_flag, SA_rock,
+def _f_sigma(Mw, vs30, vs30inf_flag, SA_rock,
             sigma_coeffs, c_other):
     s, s_est = sigma_coeffs[:-3], sigma_coeffs[-3:]
-    dAmp_p1 = f_dAmp(vs30, SA_rock, c_other) + 1
+    dAmp_p1 = _f_dAmp(vs30, SA_rock, c_other) + 1
     vs30_s = jnp.where(vs30inf_flag == 1., s_est, s[:3])
 
     phi_A = jnp.clip(vs30_s[1] + ((vs30_s[2] - vs30_s[1]) / 2) * (Mw - 4.0), min = s[1], max = s[2])
@@ -178,16 +178,16 @@ def f_sigma(Mw, vs30, vs30inf_flag, SA_rock,
 
     return (phi_sq + tau ** 2) ** (1 / 2)
 
-def f_ASK14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
+def gmm_ASK14(Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
     T_slice, a, c_other, sigma_coeffs = slice_coeffs(T) 
 
     SOF_flag = fault.calc_SOF_flag()
     R_jb, R_rup, R_epi, R_hyp, R_x = R
     
-    lnSA, SA_rock = f_lnSA_SA_rock(Mw, fault.width, fault.dip, fault.z_tor, SOF_flag,
+    lnSA, SA_rock = _f_lnSA_SA_rock(Mw, fault.width, fault.dip, fault.z_tor, SOF_flag,
                                    site.vs30, site.z1p0, R_jb, R_rup, R_x,
                                    a, c_other)
-    std = f_sigma(Mw, site.vs30, site.vs30inf_flag, SA_rock,
+    std = _f_sigma(Mw, site.vs30, site.vs30inf_flag, SA_rock,
                   sigma_coeffs, c_other)
     lnSA = jnp.interp(T, T_slice, lnSA)
     std = jnp.interp(T, T_slice, std)

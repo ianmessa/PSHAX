@@ -4,11 +4,14 @@ from jax.numpy import linalg as jnpla
 from jax.experimental.jet import jet
 from jax.scipy.special import factorial
 
-from numerics.spectral import mv_psi
+from numerics.spectral import uv_psi, mv_psi
 from collections.abc import Callable
 
-def PCE(x:jax.Array, y:jax.Array, 
-    k_PCE:int = 5, strategy:str = 'hyperbolic', q:float = 0.625, 
+from jax import debug as jdb
+
+def PCE(x:jax.Array, f:Callable, *f_args,
+    k_PCE:int = 5, strategy:str = 'hyperbolic', 
+    q:float = 0.625, order_matters:bool = True,
     alpha:float|jax.Array = 1.):
     """
     Fit a Polynomial Chaos Expansion (PCE) to data using least squares.
@@ -17,14 +20,16 @@ def PCE(x:jax.Array, y:jax.Array,
     ----------
     x : jax.Array
     Input data of shape (n_samples, n_features).
-    y : jax.Array
-    Target values of shape (n_samples,) or (n_samples, n_targets).
+    f : jax.Array
+    Function yielding target values of the form f(x, *f_args).
     k_PCE : int, optional
     Maximum polynomial order (default is 5).
     strategy : str, optional
-    Polynomial basis strategy, e.g., 'hyperbolic' (default).
+    Polynomial basis strategy. Must be 'sum', 'prod', or 'hyperbolic' (default).
     q : float, optional
     Hyperbolic truncation parameter (default is 0.625).
+    order_matters : bool, optional
+    Whether order matters for the indices of multivariate hermite polynomials (default is True).
     alpha : float or jax.Array, optional
     Scaling parameter(s) for the basis (default is 1.).
 
@@ -34,7 +39,10 @@ def PCE(x:jax.Array, y:jax.Array,
     Function that evaluates the fitted PCE at new input locations.
     """
     # Just use least squares to fit our data
-    H = mv_psi(x, 'H', k_PCE, strategy, q, alpha)
+    def fx(xi):
+        return f(xi, *f_args)
+    y = jax.vmap(fx)(x)
+    H = mv_psi(x, 'H', k_PCE, strategy, q, order_matters, alpha)
     c = jnpla.lstsq(H, y)[0]
 
     def eval_PCE(xi):
@@ -51,13 +59,14 @@ def PCE(x:jax.Array, y:jax.Array,
         y_pred : jax.Array
             Predicted values from the PCE.
         """
-        Hi = mv_psi(xi, 'H', k_PCE, strategy, q, alpha)
+        Hi = mv_psi(xi, 'H', k_PCE, strategy, q, order_matters, alpha)
         return Hi @ c
     return eval_PCE
 
-def tPCE(x:jax.Array, f:Callable, z0:float, 
-           k_taylor:int, 
-           k_PCE:int = 5, strategy:str = 'hyperbolic', q:float = 0.625, 
+def tPCE(x:jax.Array, f:Callable, z0:float, *f_args,
+            k_taylor:int = 5,
+           k_PCE:int = 5, strategy:str = 'hyperbolic', 
+           q:float = 0.625, order_matters:bool = True,
            alpha:float|jax.Array = 1.):
     """
     Construct a Taylor-Polynomial Chaos Expansion (tPCE) in variable z for a function f(z, x) using least squares.
@@ -67,7 +76,8 @@ def tPCE(x:jax.Array, f:Callable, z0:float,
     x : jax.Array
     Input data for x of shape (n_samples, n_features).
     f : Callable
-    Function of the form f(z, x).
+    Function of the form f(z, x, *f_args). Must not be vmapped across x.
+    f_args : Positional arguments to f following (z, x).
     z0 : float
     Expansion point for the Taylor series in z.
     k_taylor : int
@@ -78,6 +88,8 @@ def tPCE(x:jax.Array, f:Callable, z0:float,
     Polynomial basis strategy (default is 'hyperbolic').
     q : float, optional
     Hyperbolic truncation parameter (default is 0.625).
+    order_matters : bool, optional
+    Whether order matters for the indices of multivariate hermite polynomials (default is True).
     alpha : float or jax.Array, optional
     Scaling parameter(s) for the basis (default is 1.).
 
@@ -86,17 +98,22 @@ def tPCE(x:jax.Array, f:Callable, z0:float,
     eval_tPCE : Callable
     Function that evaluates the tPCE at new (z, x) pairs.
     """
-    # Define f only in terms of z
-    fz = lambda z: f(z, x)
+    # Define f only in terms of z, xi
+    def one_jet(xi, *args):
+        def fz(zi):
+            return f(zi, xi, *args)
+        return jet(fz, (z0,), ((1,) + (0,) * (k_taylor - 1),))
+
     # Hermite polynomials
-    H = mv_psi(x, 'H', k_PCE, strategy, q, alpha)
+    H = mv_psi(x, 'H', k_PCE, strategy, q, order_matters, alpha)
     # Take derivatives of fz
-    y_z0, dnydzn_z0 = jet(fz, (z0,), ((1,) + (0,) * (k_taylor - 1),))
+    y_z0, dnydzn_z0 = jax.vmap(one_jet, in_axes = (0,) + (None,) * len(f_args))(x, *f_args)
     dnydzn_z0 = jnp.stack([y_z0, *dnydzn_z0])
     # Use least-squares to get Taylor series coefficient derivatives by chain rule
     #   (lstsq is a linear operator) at z0
     c = jnpla.lstsq(H, dnydzn_z0.T)[0]
 
+    # Evaluate taylor coefficients
     def eval_c(z:float):
         """
         Evaluate the Taylor coefficients at a given z.
@@ -118,6 +135,7 @@ def tPCE(x:jax.Array, f:Callable, z0:float,
         # Bam
         return c @ (zM / denom)
     
+    # Evaluate final taylor PCE
     def eval_tPCE(zi:float, xi:jax.Array):
         """
         Evaluate the tPCE at a given (z, x) pair.
@@ -134,7 +152,8 @@ def tPCE(x:jax.Array, f:Callable, z0:float,
         y_pred : jax.Array
             Predicted value(s) from the tPCE.
         """
-        Hi = mv_psi(xi, 'H', k_PCE, strategy, q, alpha)
+        Hi = mv_psi(xi, 'H', k_PCE, strategy, q, order_matters, alpha)
         ci = eval_c(zi)
         return Hi @ ci
+    
     return eval_tPCE
