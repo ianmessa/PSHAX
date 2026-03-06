@@ -240,9 +240,12 @@ class GMMLT:
         gmm_idcs = jnp.arange(len(self.gmms))
         return jax.vmap(self.calc_single, in_axes = (0, None, None, None, None, None))(gmm_idcs, Mw, T, site, fault, R)
     
-    def calc_mean(self, Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
+    def calc_median(self, Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
         mu_all_lnSA, sigma_all_lnSA = self.calc_all(Mw, T, site, fault, R)
-        return mu_all_lnSA @ self.w, sigma_all_lnSA @ self.w
+        mu_median_lnSA = mu_all_lnSA @ self.w
+        # Mixture model...
+        sigma_median_lnSA = jnp.sqrt((mu_all_lnSA**2 + sigma_all_lnSA**2) @ self.w - mu_median_lnSA ** 2) ** (1 / 2)
+        return mu_median_lnSA, sigma_median_lnSA
 
     def tree_flatten(self):
         return (self.w,), self.gmms
