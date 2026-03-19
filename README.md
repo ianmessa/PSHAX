@@ -33,8 +33,14 @@ At the time of release, this library has not yet been benchmarked against widely
 
 ## Installation
 
+## Citing PSHAX
+
 ## References
 
 Lacour, M., & Abrahamson, N. (2021). Efficient Propagation of Epistemic Uncertainty for Probabilistic Seismic Hazard Analyses (PSHAs) Including Partial Correlation of Magnitude–Distance Scaling. Bulletin of the Seismological Society of America, 111 (6), 3332–3340. https://doi.org/10.1785/0120200381
+
 Lacour, M., & Abrahamson, N. (2025). Reducing Calculation Times for Seismic Hazard Using Non-Ergodic Ground-Motion Models for Areal Source Zones. Applied Sciences, 15(5), 2454. https://doi.org/10.3390/app15052454
+
 Messa, I. (2026). Accelerated Propagation of Epistemic Uncertainty for PSHA Using a Differentiable KL-PCE Framework. Department of Geography at University of Colorado Boulder. *this link will be updated once the thesis is added to the UCB Honors Thesis Repository*
+
+## Acknowledgements
