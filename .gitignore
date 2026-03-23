@@ -16,6 +16,8 @@ Paper/
 slides/
 *.m.txt
 .venv/
+.VSCodeCounter/
+__pycache__/
 
 # --- LaTeX Essential Ignores ---
 *.aux
