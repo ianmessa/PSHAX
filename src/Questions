@@ -1,2 +1,0 @@
-- Worth it to use sinusoidal single layer (e.g. trainable sparse FFT?)
-- Worth it to use hermite single layer (hermite spectral decomp of covariance function? Need biases after, then eigenfunctions will be w(H_n) + b where w = lambda)
