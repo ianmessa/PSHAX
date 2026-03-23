@@ -10,6 +10,8 @@
 *.png
 *.ipynb
 src/.VSCodeCounter/
+src/tests.py
+src/Questions.txt
 src/test_outputs/*
 src/figures/*
 Paper/
