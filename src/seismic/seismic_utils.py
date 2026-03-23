@@ -27,6 +27,7 @@ def _rake_SOF_flag(rake:float):
     # [reverse, SS, normal] -> [-1., 0., 1.]
     return (is_SS * - jnp.sign(rake))
 
+# Magnitude-frequency distribution
 @jtu.register_pytree_node_class
 class MFD:
     def __init__(self, a:float, b:float, 
@@ -241,11 +242,11 @@ class GMMLT:
         return jax.vmap(self.calc_single, in_axes = (0, None, None, None, None, None))(gmm_idcs, Mw, T, site, fault, R)
     
     def calc_median(self, Mw:float, T:float, site:Site, fault:Fault, R:jax.Array):
-        mu_all_lnSA, sigma_all_lnSA = self.calc_all(Mw, T, site, fault, R)
-        mu_median_lnSA = mu_all_lnSA @ self.w
+        all_mu_lnSA, all_std_lnSA = self.calc_all(Mw, T, site, fault, R)
+        median_mu_lnSA = all_mu_lnSA @ self.w
         # Mixture model...
-        sigma_median_lnSA = jnp.sqrt((mu_all_lnSA**2 + sigma_all_lnSA**2) @ self.w - mu_median_lnSA ** 2) ** (1 / 2)
-        return mu_median_lnSA, sigma_median_lnSA
+        median_std_lnSA = ((all_mu_lnSA**2 + all_std_lnSA**2) @ self.w - median_mu_lnSA ** 2) ** (1 / 2)
+        return median_mu_lnSA, median_std_lnSA
 
     def tree_flatten(self):
         return (self.w,), self.gmms

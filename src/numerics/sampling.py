@@ -20,3 +20,10 @@ def pts_rqmc(a:float|jax.Array, b:float|jax.Array, n:int, d:int, key:jax.Array =
     x = sobol_scrambled(n, d, key)
     x = x * (b - a) + a
     return x
+
+def pts_qmc(a:float|jax.Array, b:float|jax.Array, n:int, d:int, key:jax.Array = jrnd.key(0)):
+    a = jnp.broadcast_to(a, (d,))
+    b = jnp.broadcast_to(b, (d,))
+    x = sobol(n, d)
+    x = x * (b - a) + a
+    return x

@@ -7,10 +7,15 @@
 *.docx
 *.pptx
 *.json
-src/.VSCodeCounter/*
+*.png
+*.ipynb
+src/.VSCodeCounter/
+src/test_outputs/*
+src/figures/*
 Paper/
 slides/
 *.m.txt
+.venv/
 
 # --- LaTeX Essential Ignores ---
 *.aux

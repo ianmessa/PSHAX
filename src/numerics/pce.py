@@ -28,6 +28,7 @@ class PCE:
     def calc_coeffs(self, x:jax.Array, *f_args):
         def fx(xi):
             return self.f(xi, *f_args)
+        d = x.shape[-1]
         y = jax.vmap(fx)(x)
         H = mv_psi(x, 'H', 
                    self.k_PCE, self.strategy, 
