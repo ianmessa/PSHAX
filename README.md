@@ -16,7 +16,7 @@ This library was written with the express purpose of implementing the Karhunen-L
 - Automatic Taylor series construction for the PCE inspired by Lacour & Abrahamson, 2025. This is an experimental feature which displays some pretty nasty instabilities.
 - Written in JAX so it's amenable to GPU acceleration and fully differentiable. 
 
-I plan to expand this library as a demonstration of the continuous treatment of PSHA logic trees as nested stochastic processes, sort of like Bayesian hierarchical models. The branches of our logic tree are samples of the defensible model space; how can we use these samples to variationally infer the structure of that whole space using data-driven methods?
+I plan to expand this library as a demonstration of the continuous treatment of PSHA logic trees as nested stochastic processes, sort of like Bayesian hierarchical models. The branches of our logic tree are samples of the defensible model space; how can we use these samples to variationally infer the structure of that whole space using data-driven methods? I'm curious about variational inference because it can allow us to push a bigger part of the tree through the PCE and use additive methods (same as we use for the mean hazard) instead of MC/MCMC for EUP.
 
 ## Documentation
 
@@ -37,15 +37,23 @@ At the time of release, this library has not yet been benchmarked against widely
 ## Installation
 
 Just run 
-'''
+```
 pip install git+https://github.com/ianmessa/PSHAX
-'''
+```
 
 ## Citing PSHAX
 
 Just cite this paper: 
 
-Messa, I. (2026). Accelerated Propagation of Epistemic Uncertainty for PSHA Using a Differentiable KL-PCE Framework. Department of Geography at University of Colorado Boulder. *this link will be updated once the thesis is added to the UCB Honors Thesis Repository*
+Messa, I. (2026). Accelerated Propagation of Epistemic Uncertainty for PSHA Using a Differentiable KL-PCE Framework. Geography Department, University of Colorado Boulder. *this link will be updated once the thesis is added to the UCB Honors Thesis Repository*
+
+## Acknowledgements
+
+This paper was written under the advisory of Morteza Karimzadeh and defended in front of a board led by Bill R. Travis, with sitting board members Stephen Becker and Shideh Dashti. 
+
+Extended thanks to my supervisors and colleagues at the USGS who have given me input on this project, including Morgan Moschetti, Nicolas Luco, Peter Powers, and Andrew Makdisi.
+
+Special thanks to Maxime Lacour, who met with me to discuss this research and clarify some details about his 2021 paper with Norm Abrahamson. 
 
 ## References
 
