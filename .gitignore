@@ -8,6 +8,7 @@
 *.pptx
 *.json
 *.png
+!logo.png
 *.ipynb
 src/.VSCodeCounter/
 src/tests.py

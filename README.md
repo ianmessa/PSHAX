@@ -1,8 +1,10 @@
 # PSHAX
 
+![PSHAX Logo](misc/logo.png)
+
 PSHAX is a probabilistic seismic hazard analysis (PSHA) library written in Jax for my undergraduate honors thesis in the CU Boulder geography department. There are three parts:
 - pshax.numerics: A module full of numerical tools.
-- pshax.seismic: A module containing scenario modeling tools and the five GMMs from NGA-West2.
+- pshax.seismic: A module containing scenario modeling tools and the five GMMs from NGA-West2 (+AAY14 epistemic uncertainty).
 - pshax.hazcalc: A module containing the HazCalculator class.
 
 This library was written with the express purpose of implementing the Karhunen-Loève + Polynomial Chaos Expansion (KL-PCE) framework for epistemic uncertainty propagation (EUP) over ground motion models (GMMs) described in Lacour & Abrahamson, 2021. It includes the following improvements to the original framework:
