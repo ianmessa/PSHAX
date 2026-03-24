@@ -1,6 +1,6 @@
 # PSHAX
 
-![PSHAX Logo](misc/logo.png)
+<img src='misc/logo.png' width = '500'>
 
 PSHAX is a probabilistic seismic hazard analysis (PSHA) library written in Jax for my undergraduate honors thesis in the CU Boulder geography department. There are three parts:
 - pshax.numerics: A module full of numerical tools.
