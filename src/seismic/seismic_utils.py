@@ -400,4 +400,4 @@ class Scenario:
     
     @classmethod
     def tree_fromvec(cls, scn_vec):
-        return cls(*cls.obj_fromvec(scn_vec))
+        return cls(*cls.objs_fromvec(scn_vec))

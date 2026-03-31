@@ -4,14 +4,10 @@ from jax import lax
 from jax import random as jrnd
 from jax import numpy as jnp
 from jax import tree_util as jtu
-from jax.scipy.stats.norm import cdf as norm_cdf
-from jax.scipy.stats.truncnorm import cdf as truncnorm_cdf
+from jax.scipy.stats import norm
 
-# This
 from numerics import *
 from seismic import *
-
-from collections.abc import Callable
 
 def _faults_to_tree(faults:list[Fault])->Fault:
     return jt.map(lambda *xs: jnp.stack(xs), *faults)
@@ -59,6 +55,7 @@ class HazCalculator:
         self.dM = dM
 
     #### HELPERS ####
+    # Magnitude/rate bins for integration
     def _calc_M_n_M_bins(self, fault_tree:Fault, M_ranges:jax.Array|None = None):
         # Magnitude bins.
         M_min = fault_tree.mfd.M_min if M_ranges is None else M_ranges[:,0]
@@ -79,70 +76,83 @@ class HazCalculator:
         M_mask = jnp.any(weights_mask, axis = -1)
         return roots_M, n_M_incr, M_mask
     
-    def _calc_exc_im(self, im:float, mu_lnSA:jax.Array, std_lnSA:jax.Array):
+    # Exceedance from GMM outputs
+    def _calc_all_exc_im(self, im:float, mu_lnSA:jax.Array, std_lnSA:jax.Array):
         # Calculate cumulative probability
-        cum_prob_im = norm_cdf(jnp.log(im), loc = mu_lnSA, scale = std_lnSA)
+        cum_prob_im = norm.cdf(jnp.log(im), loc = mu_lnSA, scale = std_lnSA)
         # Note that we SHOULD implement a 3-sigma upper bound here, but it appears to be
         #   incompatible with jax.jet...
         return 1 - cum_prob_im
-
-    #### HAZARD CALC ####
-    def calc_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], M_ranges:jax.Array|None = None):
-        # Get rates, bins, roots
-        fault_tree = _faults_to_tree(faults)
-        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-        # vmap over faults...
-        map_lnSA = jax.vmap(self.gmmlt.calc_all, in_axes = (None, None, None, 0, 0))
-        # and over magnitudes
-        map_lnSA = jax.vmap(map_lnSA, in_axes = (0, None, None, None, None))
-        # Shape (number M bins, number faults, number gmms) [ijk]
-        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-        all_mu_lnSA, all_std_lnSA = map_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
-        # Shape (number ims, number M bins, number faults, number gmms) [hijk]
-        all_exc_im = jax.vmap(self._calc_exc_im, in_axes = (0, None, None))(im, all_mu_lnSA, all_std_lnSA)
-
-        # Take mean across gmms
-        mu_exc_im = jnp.einsum('k,hijk->hij', self.gmmlt.w, all_exc_im)
-        mu_haz = jnp.einsum('ijk,jk->i', mu_exc_im, n_M_incr_fast)
-        return mu_haz
     
-    def calc_preavg_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], M_ranges:jax.Array|None = None):
-        # Get rates, bins, roots
-        fault_tree = _faults_to_tree(faults)
-        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-        # vmap over faults...
+    def _calc_pre_exc_im(self, ims:jax.Array, T:float, roots_M:jax.Array, 
+                          site:Site, fault_tree:Fault, R_tree:jax.Array):
+        # Fault map
         map_lnSA = jax.vmap(self.gmmlt.calc_median, in_axes = (None, None, None, 0, 0))
-        # and over magnitudes
+        # Magnitude map
         map_lnSA = jax.vmap(map_lnSA, in_axes = (0, None, None, None, None))
-        # Shape (number M bins, number faults, number gmms) [ijk]
-        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-        median_mu_lnSA, median_std_lnSA = map_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
-        # Shape (number ims, number M bins, number faults) [hij]
-        median_exc_im = jax.vmap(self._calc_exc_im, in_axes = (0, None, None))(im, median_mu_lnSA, median_std_lnSA)
-
-        mu_haz = jnp.einsum('ijk,jk->i', median_exc_im, n_M_incr_fast)
-        return mu_haz
+        # Get exceedance
+        median_mu_lnSA, median_std_lnSA = map_lnSA(roots_M, T, site, fault_tree, R_tree)
+        # Get average exceedance for all ims
+        median_exc_im = jax.vmap(self._calc_all_exc_im, in_axes = (0, None, None))(ims, median_mu_lnSA, median_std_lnSA)
+        return median_exc_im
     
-    #### ENUMERATED EPISTEMIC UNCERTAINTY ####
-    def calc_epi_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], M_ranges:jax.Array|None = None):
-        # Get rates, bins, roots
-        fault_tree = _faults_to_tree(faults)
-        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-        # vmap over faults...
+    def _calc_post_exc_im(self, ims:jax.Array, T:float, roots_M:jax.Array, 
+                          site:Site, fault_tree:Fault, R_tree:jax.Array):
+        # Fault map
         map_lnSA = jax.vmap(self.gmmlt.calc_all, in_axes = (None, None, None, 0, 0))
-        # and over magnitudes
+        # Magnitude map
         map_lnSA = jax.vmap(map_lnSA, in_axes = (0, None, None, None, None))
-        # Shape (number M bins, number faults, number gmms) [ijk]
-        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-        all_mu_lnSA, all_std_lnSA = map_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
+        # Evaluate GMM
+        all_mu_lnSA, all_std_lnSA = map_lnSA(roots_M, T, site, fault_tree, R_tree)
+        # Get exceedances
+        all_exc_im = jax.vmap(self._calc_all_exc_im, in_axes = (0, None, None))(ims, all_mu_lnSA, all_std_lnSA)
+        # Average
+        mu_exc_im = jnp.einsum('k,hijk->hij', self.gmmlt.w, all_exc_im)
+        return mu_exc_im
+    
+    def _preavg_sigma(self, all_mu_lnSA:jax.Array, all_std_lnSA:jax.Array):
         median_mu_lnSA = all_mu_lnSA @ self.gmmlt.w
         median_std_lnSA = ((all_mu_lnSA**2 + all_std_lnSA**2) @ self.gmmlt.w - median_mu_lnSA ** 2) ** (1 / 2)
-        # Shape (number ims, number M bins, number faults, number gmms) [hijk]
-        all_exc_im = jax.vmap(self._calc_exc_im, in_axes = (0, None, None))(im, all_mu_lnSA, median_std_lnSA[:, :, None])
+        return jnp.broadcast_to(median_std_lnSA[:, :, None], all_std_lnSA.shape)
+    
+    def _postavg_sigma(self, all_mu_lnSA:jax.Array, all_std_lnSA:jax.Array):
+        return all_std_lnSA
 
+    #### HAZARD CALC ####
+    def calc_haz(self, ims:jax.Array, T:float, site:Site, faults:list[Fault], 
+                 preavg:bool=False, 
+                 M_ranges:jax.Array|None = None):
+        # Fault tree
+        fault_tree = _faults_to_tree(faults)
+        # Get R-tree for faults
+        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
+        # Get magnitude/rate roots + mask for marginal calc
+        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
+        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
+        exc_im = lax.cond(preavg, self._calc_pre_exc_im, 
+                                  self._calc_post_exc_im, 
+                                  ims, T, roots_M_fast, site, fault_tree, R_tree)
+        haz = jnp.einsum('ijk,jk->i', exc_im, n_M_incr_fast)
+        return haz
+    
+    #### ENUMERATED EPISTEMIC UNCERTAINTY ####
+    def calc_epi_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], 
+                     preavg:bool=False,
+                     M_ranges:jax.Array|None = None):
+        # Get rates, bins, roots
+        fault_tree = _faults_to_tree(faults)
+        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
+        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
+        # vmap over faults...
+        map_lnSA = jax.vmap(self.gmmlt.calc_all, in_axes = (None, None, None, 0, 0))
+        # and over magnitudes
+        map_lnSA = jax.vmap(map_lnSA, in_axes = (0, None, None, None, None))
+        # Shape (number M bins, number faults, number gmms) [ijk]
+        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
+        all_mu_lnSA, all_std_lnSA = map_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
+        all_std_lnSA = lax.cond(preavg, self._preavg_sigma, self._postavg_sigma, all_mu_lnSA, all_std_lnSA)
+        # Shape (number ims, number M bins, number faults, number gmms) [hijk]
+        all_exc_im = jax.vmap(self._calc_all_exc_im, in_axes = (0, None, None))(im, all_mu_lnSA, all_std_lnSA)
         # Take mean across gmms
         all_haz = jnp.einsum('hijk,ij->hk', all_exc_im, n_M_incr_fast)
         lnhaz = jnp.log(all_haz)
@@ -150,45 +160,6 @@ class HazCalculator:
         std_lnhaz = jnp.sqrt((lnhaz - mu_lnhaz[:, None])**2 @ self.gmmlt.w)
         std_haz = jnp.exp(std_lnhaz)
         return std_haz
-    
-    #### DISAGGREGATED HAZARD ####
-    def calc_disagg(self, im:jax.Array, T:float, site:Site, faults:list[Fault], 
-                    num_M_disagg:int = 8, num_R_disagg:int = 12,
-                    M_ranges:jax.Array|None = None):
-        # Get rates, bins, roots
-        fault_tree = _faults_to_tree(faults)
-        roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-        roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-        # vmap over faults...
-        map_lnSA = jax.vmap(self.gmmlt.calc_all, in_axes = (None, None, None, 0, 0))
-        # and over magnitudes
-        map_lnSA = jax.vmap(map_lnSA, in_axes = (0, None, None, None, None))
-        # Shape (number M bins, number faults, number gmms) [ijk]
-        R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-        all_mu_lnSA, all_std_lnSA = map_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
-        # Shape (number ims, number M bins, number faults, number gmms) [hijk]
-        all_exc_im = jax.vmap(self._calc_exc_im, in_axes = (0, None, None))(im, all_mu_lnSA, all_std_lnSA)
-
-        # Take mean across gmms, Shape(number ims, number M bins, number faults)
-        mu_exc_im = jnp.einsum('k,hijk->hij', self.gmmlt.w, all_exc_im)
-        # Shape (number ims, number M bins, number faults)
-        mu_disagg = mu_exc_im * n_M_incr_fast[None]
-
-        # Project onto unmasked M bins (number ims, number full M bins, number faults)
-        mu_disagg_full = jnp.zeros((im.shape[0], *n_M_incr.shape))
-        mu_disagg_full = mu_disagg_full.at[:, M_mask].set(mu_disagg)
-
-        # Aggregate into true M bins (number ims, number disagg M bins, number faults)
-        disagg_M_bins = jnp.linspace(roots_M.min(), roots_M.max(), num_M_disagg)
-        M_idcs = jnp.digitize(roots_M, disagg_M_bins)
-        mu_disagg_M = jax.vmap(jax.vmap(jax.ops.segment_sum, in_axes = (0, None)), in_axes = (2, None), out_axes = 2)(mu_disagg_full, M_idcs)
-
-        # Aggregate into R bins according to R tree (number ims, number disagg M bins, number disagg R bins)
-        disagg_R_bins = jnp.logspace(jnp.log10(R_tree[0].min()), jnp.log10(R_tree[0].max()), num_R_disagg, base = 10)
-        R_idcs = jnp.digitize(R_tree[0], disagg_R_bins)
-        mu_disagg_MR = jax.vmap(jax.vmap(jax.ops.segment_sum, in_axes = (0, None)), in_axes = (1, None), out_axes = 1)(mu_disagg_M, R_idcs)
-
-        return mu_disagg_MR / mu_disagg_MR.sum(), disagg_M_bins, disagg_R_bins
     
     #### KL HELPER ####
     def KLE(self, scn_vec:jax.Array, 
@@ -233,6 +204,41 @@ class HazCalculator:
             return _rbf_eigfns(params_transf_eval_scaled)
 
         return eigvals, eigfns
+    
+    def _pce_haz_fit(self, x:jax.Array, im:float,
+                         eval_scn_eigfns:jax.Array,
+                         median_mu_lnSA:jax.Array, median_std_lnSA:jax.Array, 
+                         n_M_incr:jax.Array,
+                         dlnhaz:bool = False):
+        # Apply KL-expanded covariance function evaluated at
+        #   input random variable
+        median_mu_hat_lnSA = median_mu_lnSA + eval_scn_eigfns @ x
+        # Calculate exceedance
+        exc_im = self._calc_all_exc_im(im, median_mu_lnSA, median_std_lnSA)
+        exc_im_hat = self._calc_all_exc_im(im, median_mu_hat_lnSA, median_std_lnSA)
+        # Finish (the quadrature-sum would distribute over the difference)
+        haz = jnp.einsum('ij,ij->', exc_im, n_M_incr)
+        haz_hat = jnp.einsum('ij,ij->', exc_im_hat, n_M_incr)
+        # Update based on what we're fitting to...
+        ret = jnp.where(dlnhaz, jnp.log(haz_hat / haz), haz_hat)
+        return ret
+    
+    def _lnhaz_from_pce_haz(self, pce_out:jax.Array, median_haz):
+        return jnp.log(jnp.clip(1e-8, pce_out))
+    
+    def _lnhaz_from_pce_dlnhaz(self, pce_out:jax.Array, median_haz):
+        all_haz = jnp.log(median_haz)[:, None] + pce_out
+        return all_haz
+
+    def _pce_haz_eval(self, n_eval:int, key:jax.Array,
+                      dlnhaz:bool, haz_pce:PCE, c:jax.Array,
+                      median_haz:jax.Array, k_KL:int):
+        xi = jrnd.normal(key, (n_eval, k_KL))
+        pce_out = jax.vmap(haz_pce.eval_coeffs, in_axes = (None, 0))(xi, c)
+        all_lnhaz = lax.cond(dlnhaz, self._lnhaz_from_pce_dlnhaz, 
+                                     self._lnhaz_from_pce_haz,
+                                     pce_out, median_haz)
+        return jnp.exp(all_lnhaz.mean(axis = -1)), jnp.exp(jnp.quantile(all_lnhaz, 0.5, axis = -1)), jnp.exp(all_lnhaz.std(axis = -1)), jnp.exp(all_lnhaz)
 
     #### KL-PCE UQ ####
     def KLPCE(self, scn_vec:jax.Array, 
@@ -251,8 +257,9 @@ class HazCalculator:
                                   k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
                                   keyKLE)
 
-        def build_PCE(T:float, site:Site, faults:list[Fault], IMs:jax.Array,
+        def build_PCE(T:float, site:Site, faults:list[Fault], ims:jax.Array,
                     n_PCE_samples:int, k_PCE:int, strategy:str = 'hyperbolic', q:float = 0.625,
+                    dlnhaz:bool = True,
                     M_ranges:jax.Array|None = None,
                     key:jax.Array = key_PCE):
             key_calc, key_eval = jrnd.split(key, 2)
@@ -284,33 +291,26 @@ class HazCalculator:
             eval_scn_eigfns = eval_scn_eigfns * jnp.sqrt(eigvals[None, None, :])
 
             # Fit to the residual hazard between the mean and a perturbation
-            def _delta_lnhaz_wrapped(x, IM, median_lnhaz):
-                # Apply KL-expanded covariance function evaluated at
-                #   input random variable
-                mean_mu_hat_lnSA = median_mu_lnSA + eval_scn_eigfns @ x
-                # Calculate exceedance
-                exc_im_hat = self._calc_exc_im(IM, mean_mu_hat_lnSA, median_std_lnSA)
-                # Finish (the quadrature-sum would distribute over the difference... I think)
-                lnhaz_hat = jnp.log(jnp.einsum('ij,ij->', exc_im_hat, n_M_incr_fast))
-                return lnhaz_hat - median_lnhaz
-
-            # Use above function to calculate true hazard
-            median_lnhaz = jax.vmap(_delta_lnhaz_wrapped, in_axes = (None, 0, None))(jnp.zeros(k_KL), IMs, 0.)
+            pce_haz_args = [eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr_fast, dlnhaz]
 
             # Take realizations of k_KL standard normal Gaussian random variables
+            # But use RQMC. 
             X = jrnd.normal(key_calc, (n_PCE_samples, k_KL))
+            #X = jax.vmap(norm.ppf)(pts_rqmc(0, 1, n_PCE_samples, k_KL, key = key_calc))
             # Fit PCE
-            delta_haz_pce = PCE(_delta_lnhaz_wrapped, k_PCE = k_PCE, 
+            haz_pce = PCE(self._pce_haz_fit, k_PCE = k_PCE, 
                       strategy = strategy, q = q)
-            c = jax.vmap(delta_haz_pce.calc_coeffs, in_axes = (None, 0, 0))(X, IMs, median_lnhaz)
+            c = jax.vmap(haz_pce.calc_coeffs, in_axes = (None, 0) + (None,) * len(pce_haz_args))(X, ims, *pce_haz_args)
 
-            def evaluate(n_eval:int, key:jax.Array = key_eval):
-                xi = jrnd.normal(key, (n_eval, k_KL))
-                delta_lnhaz = jax.vmap(delta_haz_pce.eval_coeffs, in_axes = (None, 0))(xi, c)
-                all_lnhaz = median_lnhaz[:, None] + delta_lnhaz
-                return jnp.exp(median_lnhaz), jnp.exp(all_lnhaz.std(axis = -1))
+            # Best way to do this at the moment...
+            median_haz = self.calc_haz(ims, T, site, faults, True, M_ranges)
+
+            def evaluate(C:jax.Array, median_haz:jax.Array, n_eval:int, key:jax.Array = key_eval):
+                mu_haz, p50_haz, epi_haz, all_haz = self._pce_haz_eval(n_eval, key, dlnhaz, 
+                                               haz_pce, C, median_haz, k_KL)
+                return mu_haz, p50_haz, epi_haz, all_haz
                 
-            return evaluate
+            return c,median_haz,evaluate
         
         return build_PCE
     
@@ -320,86 +320,90 @@ class HazCalculator:
                 n_KL_samples:int, C:Callable, 
                 k_KL:int, m_os_KL:int, k_cheb_KL:int, k_phs_KL:int, k_poly_KL:int,
                 key:jax.Array = jrnd.key(0)):
-        # Split key
-        keyKLE, key_tPCE = jrnd.split(key, 2)
+        print('Broken...')
+        return 0
+        # # Split key
+        # keyKLE, key_tPCE = jrnd.split(key, 2)
 
-        # Grab eigenfunctions + eigenvalues
-        eigvals, eigfns = self.KLE(scn_vec, 
-                                  params_idcs, params_transforms, params_a, params_b, 
-                                  n_KL_samples, C,
-                                  k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
-                                  keyKLE)
+        # # Grab eigenfunctions + eigenvalues
+        # eigvals, eigfns = self.KLE(scn_vec, 
+        #                           params_idcs, params_transforms, params_a, params_b, 
+        #                           n_KL_samples, C,
+        #                           k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
+        #                           keyKLE)
 
-        def build_tPCE(T:float, site:Site, faults:list[Fault], IM0:jax.Array,
-                    n_PCE_samples:int, k_taylor:int, k_PCE:int, 
-                    strategy:str = 'hyperbolic', q:float = 0.625,
-                    M_ranges:jax.Array|None = None,
-                    key:jax.Array = key_tPCE):
-            key_calc, key_eval = jrnd.split(key, 2)
-            ### THIS WILL BE A BROKEN-UP HAZARD CALCULATON ###
-            fault_tree = _faults_to_tree(faults)
-            roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-            # Just to speed up marginal calculations like the one we perform for the test scenario
-            roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-            # vmap over faults...
-            map_median_lnSA = jax.vmap(self.gmmlt.calc_median, in_axes = (None, None, None, 0, 0))
-            # and over magnitudes
-            map_median_lnSA = jax.vmap(map_median_lnSA, in_axes = (0, None, None, None, None))
-            # Shape (number M bins, number faults)
-            R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-            median_mu_lnSA, median_std_lnSA = map_median_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
+        # def build_tPCE(T:float, site:Site, faults:list[Fault], IM0:jax.Array,
+        #             n_PCE_samples:int, k_taylor:int, k_PCE:int, 
+        #             strategy:str = 'hyperbolic', q:float = 0.625,
+        #             dlnhaz:bool = True,
+        #             M_ranges:jax.Array|None = None,
+        #             key:jax.Array = key_tPCE):
+        #     key_calc, key_eval = jrnd.split(key, 2)
+        #     ### THIS WILL BE A BROKEN-UP HAZARD CALCULATON ###
+        #     fault_tree = _faults_to_tree(faults)
+        #     roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
+        #     # Just to speed up marginal calculations like the one we perform for the test scenario
+        #     roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
+        #     # vmap over faults...
+        #     map_median_lnSA = jax.vmap(self.gmmlt.calc_median, in_axes = (None, None, None, 0, 0))
+        #     # and over magnitudes
+        #     map_median_lnSA = jax.vmap(map_median_lnSA, in_axes = (0, None, None, None, None))
+        #     # Shape (number M bins, number faults)
+        #     R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
+        #     median_mu_lnSA, median_std_lnSA = map_median_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
 
-            # Build input scenario vector using double vmap
-            #   Shape (number M bins, number faults, k_KL)
-            map_scn = jax.vmap(Scenario, in_axes = (0, None, None, None))
-            map_scn = jax.vmap(map_scn, in_axes = (None, None, None, 0))
-            eval_scn_vec = map_scn(roots_M_fast, T, site, fault_tree).tree_tovec().T
-            # Extract partially correlated parameters
-            eval_scn_params = eval_scn_vec[:, :, params_idcs]
+        #     # Build input scenario vector using double vmap
+        #     #   Shape (number M bins, number faults, k_KL)
+        #     map_scn = jax.vmap(Scenario, in_axes = (0, None, None, None))
+        #     map_scn = jax.vmap(map_scn, in_axes = (None, None, None, 0))
+        #     eval_scn_vec = map_scn(roots_M_fast, T, site, fault_tree).tree_tovec().T
+        #     # Extract partially correlated parameters
+        #     eval_scn_params = eval_scn_vec[:, :, params_idcs]
 
-            # Evaluate eigenfunctons at correlation parameters
-            #   Shape (number M bins, number faults, k_KL)
-            eval_scn_eigfns = jax.vmap(eigfns)(eval_scn_params)
-            # Eigenvalue scaling...
-            eval_scn_eigfns = eval_scn_eigfns * jnp.sqrt(eigvals[None, None, :])
+        #     # Evaluate eigenfunctons at correlation parameters
+        #     #   Shape (number M bins, number faults, k_KL)
+        #     eval_scn_eigfns = jax.vmap(eigfns)(eval_scn_params)
+        #     # Eigenvalue scaling...
+        #     eval_scn_eigfns = eval_scn_eigfns * jnp.sqrt(eigvals[None, None, :])
 
-            # Wrap up *args for _delta_lnhaz_wrapped
-            delta_lnhaz_args = [median_mu_lnSA, median_std_lnSA, eval_scn_eigfns, n_M_incr_fast]
+        #     # Wrap up *args for _delta_lnhaz_wrapped
+        #     delta_lnhaz_args = [eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr_fast]
 
-            # Define wrapped hazard calculation at z
-            # "hatmul" is just a little helper to calculate median hazard further down because I am lazy
-            def _delta_lnhaz_wrapped(lnIM, x, median_mu_lnSA, median_std_lnSA, eval_scn_eigfns, n_M_incr_fast, hatmul:float = 1.):
-                IM = jnp.exp(lnIM)
-                # Apply KL-expanded covariance function evaluated at
-                #   input random variable
-                median_mu_hat_lnSA = median_mu_lnSA + eval_scn_eigfns @ x
-                # Finish hazard calculation for og and perturbed
-                exc_im = self._calc_exc_im(IM, median_mu_lnSA, median_std_lnSA)
-                exc_im_hat = self._calc_exc_im(IM, median_mu_hat_lnSA, median_std_lnSA)
-                median_lnhaz = jnp.log(jnp.einsum('ij,ij->', exc_im, n_M_incr_fast))
-                lnhaz_hat = jnp.log(jnp.einsum('ij,ij->', exc_im_hat, n_M_incr_fast))
-                return median_lnhaz - hatmul * lnhaz_hat
-        
-            # Take realizations of k_KL standard normal Gaussian random variables
-            X = jrnd.normal(key_calc, (n_PCE_samples, k_KL))
-
-            # Fit PCE
-            delta_lnhaz_tpce = tPCE(_delta_lnhaz_wrapped, k_taylor = k_taylor, k_PCE = k_PCE, 
-                      strategy = strategy, q = q)
-             
-            c_eval = delta_lnhaz_tpce.calc_coeffs(jnp.log(IM0), X, *delta_lnhaz_args)
-
-            def evaluate(IMs:jax.Array, n_eval:int, key:jax.Array = key_eval):
-                xi = jrnd.normal(key, (n_eval, k_KL))
-                lnIMs = jnp.log(IMs)
-                delta_lnhaz = jax.vmap(delta_lnhaz_tpce.eval_coeffs, in_axes = (0, None, None))(lnIMs, xi, c_eval)
-                median_lnhaz = jax.vmap(_delta_lnhaz_wrapped, in_axes = (0, None, None, None, None, None))(lnIMs, jnp.zeros(k_KL), *delta_lnhaz_args, hatmul = lnIMs * 0.)
-                all_lnhaz = median_lnhaz[:, None] + delta_lnhaz
-                return jnp.exp(median_lnhaz), jnp.exp(all_lnhaz.std(axis = -1))
+        #     # Define wrapped hazard calculation at z
+        #     # "hatmul" is just a little helper to calculate median hazard further down because I am lazy
             
-            return evaluate
+        #     def _haz_fit(ln_im0, x, eval_scn_eigfns:jax.Array,
+        #                  median_mu_lnSA:jax.Array, median_std_lnSA:jax.Array, 
+        #                  n_M_incr:jax.Array):
+        #         return self._pce_haz_fit(x, jnp.exp(ln_im0), eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr, dlnhaz)
         
-        return build_tPCE
+        #     # Take realizations of k_KL standard normal Gaussian random variables
+        #     X = jrnd.normal(key_calc, (n_PCE_samples, k_KL))
+
+        #     for xi in X:
+        #         plt.plot(ims, jax.vmap(_haz_fit, in_axes = (0, None) + (None,) * 4)(jnp.log(ims), xi, eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr), lw = 0.8, alpha = 0.5)
+        #     plt.xscale('log')
+        #     plt.yscale('log')
+        #     plt.show()
+
+        #     # Fit PCE
+        #     _lnhaz_tpce = tPCE(_haz_fit, k_taylor = k_taylor, k_PCE = k_PCE, 
+        #               strategy = strategy, q = q)
+             
+        #     c_eval = _lnhaz_tpce.calc_coeffs(jnp.log(IM0), X, *delta_lnhaz_args)
+
+        #     # Best way to do this at the moment...
+        #     median_haz = self.calc_haz(ims, T, site, faults, True, M_ranges)
+
+        #     def evaluate(ims:jax.Array, n_eval:int, key:jax.Array = key_eval):
+        #         xi = jrnd.normal(key, (n_eval, k_KL))
+        #         lnims = jnp.log(ims)
+        #         all_dlnhaz = jax.vmap(_lnhaz_tpce.eval_coeffs, in_axes = (0, None, None))(lnims, xi, c_eval)
+        #         return median_haz * jnp.exp(all_dlnhaz)
+            
+        #     return evaluate
+        
+        # return build_tPCE
      
     def tree_flatten(self):
         return (self.gmmlt, self.dM), None

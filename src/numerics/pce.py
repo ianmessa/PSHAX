@@ -34,8 +34,7 @@ class PCE:
                    self.k_PCE, self.strategy, 
                    self.q, self.order_matters, 
                    self.alpha)
-        H_norm2 = jnp.vecdot(H, H, axis = 0)
-        c = (H.T @ y) / H_norm2
+        c = jnpla.lstsq(H, y)[0]
         return c
     
     def eval_coeffs(self, xi:jax.Array, c:jax.Array):

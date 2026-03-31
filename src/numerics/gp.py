@@ -207,7 +207,7 @@ def C_Paciorek_aniso(X:jax.Array, Y:jax.Array, w:jax.Array):
     C = crossvar_Y * jnp.prod(corrs, axis = -1)
     return C
 
-def C_fullcor(X:jax.Array, Y:jax.Array, w:jax.Array):
+def C_fullcorr(X:jax.Array, Y:jax.Array, w:jax.Array):
     """
     Compute the nonstationary anisotropic covariance matrix using the kernel from Paciorek & Schervish (2003) [DOI:10.5555/2981345.2981380].
 
