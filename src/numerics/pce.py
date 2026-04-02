@@ -74,6 +74,28 @@ class tPCE:
         self. q = q
         self.order_matters = order_matters
         self.alpha = alpha
+
+    # Evaluate taylor coefficients
+    def _eval_c(self, c0, z0:float, z:float):
+        """
+        Evaluate the tPCE coefficient array at a given deterministic input z.
+
+        Combines the least-squares PCE coefficient matrix c with a monomial
+        Taylor basis evaluated at (z - z0), weighted by factorial denominators,
+        to return the effective PCE coefficients for the scalar value z.
+
+        Args:
+            z: Scalar deterministic input at which to evaluate the Taylor expansion.
+
+        Returns:
+            Array of shape (P, ...) containing the PCE coefficients at z.
+        """
+        # Monomials for taylor expansion
+        transf_zM = uv_psi(z - z0, 'M', self.k_taylor + 1)
+        # Factorial denominator
+        denom = factorial(jnp.arange(self.k_taylor + 1))
+        # Bam
+        return c0 @ (transf_zM / denom)
     
     def calc_coeffs(self, z0:float, x:jax.Array, *f_args):
         def one_jet(xi, *args):
@@ -89,44 +111,22 @@ class tPCE:
 
         # Take derivatives of fz
         y_z0, dnydzn_z0 = jax.vmap(one_jet, in_axes = (0,) + (None,) * len(f_args))(x, *f_args)
-        dnydzn_z0 = jnp.stack([y_z0, *dnydzn_z0])
+        dnydzn_z0 = jnp.stack([y_z0, *dnydzn_z0], axis = -1)
 
         # Use least-squares to get Taylor series coefficient derivatives by chain rule
         #   (lstsq is a linear operator) at z0
-        H_norm2 = jnp.vecdot(H, H, axis = 0)
-        c = (H.T @ dnydzn_z0.T) / H_norm2[:, None]
 
-        # Evaluate taylor coefficients
-        def eval_c(z:float):
-            """
-            Evaluate the tPCE coefficient array at a given deterministic input z.
+        c0 = jnpla.lstsq(H, dnydzn_z0)[0]
 
-            Combines the least-squares PCE coefficient matrix c with a monomial
-            Taylor basis evaluated at (z - z0), weighted by factorial denominators,
-            to return the effective PCE coefficients for the scalar value z.
-
-            Args:
-                z: Scalar deterministic input at which to evaluate the Taylor expansion.
-
-            Returns:
-                Array of shape (P, ...) containing the PCE coefficients at z.
-            """
-            # Monomials for taylor expansion
-            transf_zM = uv_psi(z - z0, 'M', self.k_taylor + 1)
-            # Factorial denominator
-            denom = factorial(jnp.arange(self.k_taylor + 1))
-            # Bam
-            return c @ (transf_zM / denom)
-
-        return eval_c
+        return c0
     
-    def eval_coeffs(self, zi:float, xi:jax.Array, eval_c:Callable):
+    def eval_coeffs(self, c0:jax.Array, z0:float, zi:float, xi:jax.Array):
         Hi = mv_psi(xi, 'H', 
                    self.k_PCE, self.strategy, 
                    self.q, self.order_matters, 
                    self.alpha)
-        c = eval_c(zi)
-        return Hi @ c
+        ci = self._eval_c(c0, z0, zi)
+        return Hi @ ci
     
     def tree_flatten(self):
         leaves = (self.alpha,)

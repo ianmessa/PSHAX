@@ -136,7 +136,7 @@ class HazCalculator:
         return haz
     
     #### ENUMERATED EPISTEMIC UNCERTAINTY ####
-    def calc_epi_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], 
+    def calc_all_haz(self, im:jax.Array, T:float, site:Site, faults:list[Fault], 
                      preavg:bool=False,
                      M_ranges:jax.Array|None = None):
         # Get rates, bins, roots
@@ -155,11 +155,7 @@ class HazCalculator:
         all_exc_im = jax.vmap(self._calc_all_exc_im, in_axes = (0, None, None))(im, all_mu_lnSA, all_std_lnSA)
         # Take mean across gmms
         all_haz = jnp.einsum('hijk,ij->hk', all_exc_im, n_M_incr_fast)
-        lnhaz = jnp.log(all_haz)
-        mu_lnhaz = lnhaz @ self.gmmlt.w
-        std_lnhaz = jnp.sqrt((lnhaz - mu_lnhaz[:, None])**2 @ self.gmmlt.w)
-        std_haz = jnp.exp(std_lnhaz)
-        return std_haz
+        return all_haz
     
     #### KL HELPER ####
     def KLE(self, scn_vec:jax.Array, 
@@ -223,22 +219,33 @@ class HazCalculator:
         ret = jnp.where(dlnhaz, jnp.log(haz_hat / haz), haz_hat)
         return ret
     
-    def _lnhaz_from_pce_haz(self, pce_out:jax.Array, median_haz):
+    def _lnhaz_from_pce_haz(self, pce_out:jax.Array, mean_haz:jax.Array):
         return jnp.log(jnp.clip(1e-8, pce_out))
     
-    def _lnhaz_from_pce_dlnhaz(self, pce_out:jax.Array, median_haz):
-        all_haz = jnp.log(median_haz)[:, None] + pce_out
+    def _lnhaz_from_pce_dlnhaz(self, pce_out:jax.Array, mean_haz:jax.Array):
+        all_haz = jnp.log(mean_haz)[:, None] + pce_out
         return all_haz
 
     def _pce_haz_eval(self, n_eval:int, key:jax.Array,
                       dlnhaz:bool, haz_pce:PCE, c:jax.Array,
-                      median_haz:jax.Array, k_KL:int):
+                      mean_haz:jax.Array, k_KL:int):
         xi = jrnd.normal(key, (n_eval, k_KL))
         pce_out = jax.vmap(haz_pce.eval_coeffs, in_axes = (None, 0))(xi, c)
         all_lnhaz = lax.cond(dlnhaz, self._lnhaz_from_pce_dlnhaz, 
                                      self._lnhaz_from_pce_haz,
-                                     pce_out, median_haz)
-        return jnp.exp(all_lnhaz.mean(axis = -1)), jnp.exp(jnp.quantile(all_lnhaz, 0.5, axis = -1)), jnp.exp(all_lnhaz.std(axis = -1)), jnp.exp(all_lnhaz)
+                                     pce_out, mean_haz)
+        return jnp.exp(all_lnhaz)
+    
+    def _tpce_haz_eval(self, n_eval:int, key:jax.Array,
+                      dlnhaz:bool, haz_tpce:tPCE, 
+                      c0:jax.Array, im0:float, ims:float,
+                      mean_haz:jax.Array, k_KL:int):
+        xi = jrnd.normal(key, (n_eval, k_KL))
+        pce_out = jax.vmap(haz_tpce.eval_coeffs, in_axes = (None, None, 0, None))(c0, jnp.log(im0), jnp.log(ims), xi)
+        all_lnhaz = lax.cond(dlnhaz, self._lnhaz_from_pce_dlnhaz, 
+                                     self._lnhaz_from_pce_haz,
+                                     pce_out, mean_haz)
+        return jnp.exp(all_lnhaz)
 
     #### KL-PCE UQ ####
     def KLPCE(self, scn_vec:jax.Array, 
@@ -248,14 +255,14 @@ class HazCalculator:
                 k_KL:int, m_os_KL:int, k_cheb_KL:int, k_phs_KL:int, k_poly_KL:int,
                 key:jax.Array = jrnd.key(0)):
         # Split key
-        keyKLE, key_PCE = jrnd.split(key, 2)
+        key_KLE, key_PCE = jrnd.split(key, 2)
 
         # Grab eigenfunctions + eigenvalues
         eigvals, eigfns = self.KLE(scn_vec, 
                                   params_idcs, params_transforms, params_a, params_b, 
                                   n_KL_samples, C,
                                   k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
-                                  keyKLE)
+                                  key_KLE)
 
         def build_PCE(T:float, site:Site, faults:list[Fault], ims:jax.Array,
                     n_PCE_samples:int, k_PCE:int, strategy:str = 'hyperbolic', q:float = 0.625,
@@ -303,14 +310,14 @@ class HazCalculator:
             c = jax.vmap(haz_pce.calc_coeffs, in_axes = (None, 0) + (None,) * len(pce_haz_args))(X, ims, *pce_haz_args)
 
             # Best way to do this at the moment...
-            median_haz = self.calc_haz(ims, T, site, faults, True, M_ranges)
+            mean_haz = self.calc_haz(ims, T, site, faults, True, M_ranges)
 
-            def evaluate(C:jax.Array, median_haz:jax.Array, n_eval:int, key:jax.Array = key_eval):
-                mu_haz, p50_haz, epi_haz, all_haz = self._pce_haz_eval(n_eval, key, dlnhaz, 
-                                               haz_pce, C, median_haz, k_KL)
-                return mu_haz, p50_haz, epi_haz, all_haz
+            def evaluate(c:jax.Array, mean_haz:jax.Array, n_eval:int, key:jax.Array = key_eval):
+                all_haz = self._pce_haz_eval(n_eval, key, dlnhaz, 
+                                               haz_pce, c, mean_haz, k_KL)
+                return all_haz
                 
-            return c,median_haz,evaluate
+            return c,mean_haz,evaluate
         
         return build_PCE
     
@@ -320,90 +327,72 @@ class HazCalculator:
                 n_KL_samples:int, C:Callable, 
                 k_KL:int, m_os_KL:int, k_cheb_KL:int, k_phs_KL:int, k_poly_KL:int,
                 key:jax.Array = jrnd.key(0)):
-        print('Broken...')
-        return 0
-        # # Split key
-        # keyKLE, key_tPCE = jrnd.split(key, 2)
+        # Split key
+        key_KLE, key_tPCE = jrnd.split(key, 2)
 
-        # # Grab eigenfunctions + eigenvalues
-        # eigvals, eigfns = self.KLE(scn_vec, 
-        #                           params_idcs, params_transforms, params_a, params_b, 
-        #                           n_KL_samples, C,
-        #                           k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
-        #                           keyKLE)
+        # Grab eigenfunctions + eigenvalues
+        eigvals, eigfns = self.KLE(scn_vec, 
+                                  params_idcs, params_transforms, params_a, params_b, 
+                                  n_KL_samples, C,
+                                  k_KL, m_os_KL, k_cheb_KL, k_phs_KL, k_poly_KL,
+                                  key_KLE)
 
-        # def build_tPCE(T:float, site:Site, faults:list[Fault], IM0:jax.Array,
-        #             n_PCE_samples:int, k_taylor:int, k_PCE:int, 
-        #             strategy:str = 'hyperbolic', q:float = 0.625,
-        #             dlnhaz:bool = True,
-        #             M_ranges:jax.Array|None = None,
-        #             key:jax.Array = key_tPCE):
-        #     key_calc, key_eval = jrnd.split(key, 2)
-        #     ### THIS WILL BE A BROKEN-UP HAZARD CALCULATON ###
-        #     fault_tree = _faults_to_tree(faults)
-        #     roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
-        #     # Just to speed up marginal calculations like the one we perform for the test scenario
-        #     roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
-        #     # vmap over faults...
-        #     map_median_lnSA = jax.vmap(self.gmmlt.calc_median, in_axes = (None, None, None, 0, 0))
-        #     # and over magnitudes
-        #     map_median_lnSA = jax.vmap(map_median_lnSA, in_axes = (0, None, None, None, None))
-        #     # Shape (number M bins, number faults)
-        #     R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
-        #     median_mu_lnSA, median_std_lnSA = map_median_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
+        def build_tPCE(T:float, site:Site, faults:list[Fault], im0:jax.Array,
+                    n_PCE_samples:int, k_taylor:int, k_PCE:int, 
+                    strategy:str = 'hyperbolic', q:float = 0.625,
+                    dlnhaz:bool = True,
+                    M_ranges:jax.Array|None = None,
+                    key:jax.Array = key_tPCE):
+            key_calc, key_eval = jrnd.split(key, 2)
+            ### THIS WILL BE A BROKEN-UP HAZARD CALCULATON ###
+            fault_tree = _faults_to_tree(faults)
+            roots_M, n_M_incr, M_mask = self._calc_M_n_M_bins(fault_tree, M_ranges)
+            # Just to speed up marginal calculations like the one we perform for the test scenario
+            roots_M_fast, n_M_incr_fast = roots_M[M_mask], n_M_incr[M_mask]
+            # vmap over faults...
+            map_mean_lnSA = jax.vmap(self.gmmlt.calc_median, in_axes = (None, None, None, 0, 0))
+            # and over magnitudes
+            map_mean_lnSA = jax.vmap(map_mean_lnSA, in_axes = (0, None, None, None, None))
+            # Shape (number M bins, number faults)
+            R_tree = jax.vmap(calc_R, in_axes = (None, 0))(site, fault_tree)
+            median_mu_lnSA, median_std_lnSA = map_mean_lnSA(roots_M_fast, T, site, fault_tree, R_tree)
 
-        #     # Build input scenario vector using double vmap
-        #     #   Shape (number M bins, number faults, k_KL)
-        #     map_scn = jax.vmap(Scenario, in_axes = (0, None, None, None))
-        #     map_scn = jax.vmap(map_scn, in_axes = (None, None, None, 0))
-        #     eval_scn_vec = map_scn(roots_M_fast, T, site, fault_tree).tree_tovec().T
-        #     # Extract partially correlated parameters
-        #     eval_scn_params = eval_scn_vec[:, :, params_idcs]
+            # Build input scenario vector using double vmap
+            #   Shape (number M bins, number faults, k_KL)
+            map_scn = jax.vmap(Scenario, in_axes = (0, None, None, None))
+            map_scn = jax.vmap(map_scn, in_axes = (None, None, None, 0))
+            eval_scn_vec = map_scn(roots_M_fast, T, site, fault_tree).tree_tovec().T
+            # Extract partially correlated parameters
+            eval_scn_params = eval_scn_vec[:, :, params_idcs]
 
-        #     # Evaluate eigenfunctons at correlation parameters
-        #     #   Shape (number M bins, number faults, k_KL)
-        #     eval_scn_eigfns = jax.vmap(eigfns)(eval_scn_params)
-        #     # Eigenvalue scaling...
-        #     eval_scn_eigfns = eval_scn_eigfns * jnp.sqrt(eigvals[None, None, :])
+            # Evaluate eigenfunctons at correlation parameters
+            #   Shape (number M bins, number faults, k_KL)
+            eval_scn_eigfns = jax.vmap(eigfns)(eval_scn_params)
+            # Eigenvalue scaling...
+            eval_scn_eigfns = eval_scn_eigfns * jnp.sqrt(eigvals[None, None, :])
 
-        #     # Wrap up *args for _delta_lnhaz_wrapped
-        #     delta_lnhaz_args = [eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr_fast]
+            # Fit to the residual hazard between the mean and a perturbation
+            pce_haz_args = [eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr_fast, dlnhaz]
 
-        #     # Define wrapped hazard calculation at z
-        #     # "hatmul" is just a little helper to calculate median hazard further down because I am lazy
+            # Take realizations of k_KL standard normal Gaussian random variables
+            X = jrnd.normal(key_calc, (n_PCE_samples, k_KL))
             
-        #     def _haz_fit(ln_im0, x, eval_scn_eigfns:jax.Array,
-        #                  median_mu_lnSA:jax.Array, median_std_lnSA:jax.Array, 
-        #                  n_M_incr:jax.Array):
-        #         return self._pce_haz_fit(x, jnp.exp(ln_im0), eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr, dlnhaz)
-        
-        #     # Take realizations of k_KL standard normal Gaussian random variables
-        #     X = jrnd.normal(key_calc, (n_PCE_samples, k_KL))
-
-        #     for xi in X:
-        #         plt.plot(ims, jax.vmap(_haz_fit, in_axes = (0, None) + (None,) * 4)(jnp.log(ims), xi, eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr), lw = 0.8, alpha = 0.5)
-        #     plt.xscale('log')
-        #     plt.yscale('log')
-        #     plt.show()
-
-        #     # Fit PCE
-        #     _lnhaz_tpce = tPCE(_haz_fit, k_taylor = k_taylor, k_PCE = k_PCE, 
-        #               strategy = strategy, q = q)
-             
-        #     c_eval = _lnhaz_tpce.calc_coeffs(jnp.log(IM0), X, *delta_lnhaz_args)
-
-        #     # Best way to do this at the moment...
-        #     median_haz = self.calc_haz(ims, T, site, faults, True, M_ranges)
-
-        #     def evaluate(ims:jax.Array, n_eval:int, key:jax.Array = key_eval):
-        #         xi = jrnd.normal(key, (n_eval, k_KL))
-        #         lnims = jnp.log(ims)
-        #         all_dlnhaz = jax.vmap(_lnhaz_tpce.eval_coeffs, in_axes = (0, None, None))(lnims, xi, c_eval)
-        #         return median_haz * jnp.exp(all_dlnhaz)
+            # Rearrange function for tPCE
+            def _tpce_haz_fit(im, x, eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr, dlnhaz):
+                return self._pce_haz_fit(x, im, eval_scn_eigfns, median_mu_lnSA, median_std_lnSA, n_M_incr, dlnhaz)
             
-        #     return evaluate
+            # And calculate coefficients
+            haz_tpce = tPCE(_tpce_haz_fit, k_taylor = k_taylor, k_PCE = k_PCE, 
+                      strategy = strategy, q = q)
+            c0 = haz_tpce.calc_coeffs(jnp.log(im0), X, *pce_haz_args)
+
+            def evaluate(c0:jax.Array, ims, mean_haz:jax.Array, n_eval:int, key:jax.Array = key_eval):
+                all_haz = self._tpce_haz_eval(n_eval, key, dlnhaz, haz_tpce, c0, im0, ims, mean_haz, k_KL)
+                return all_haz
+                
+            return c0, evaluate
         
-        # return build_tPCE
+        return build_tPCE
      
     def tree_flatten(self):
         return (self.gmmlt, self.dM), None
