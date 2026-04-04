@@ -2,6 +2,8 @@
 
 <img src='misc/logo.png' width = '500'>
 
+**THIS REPO IS ONLY ONLINE AS AN EXAMPLE FROM MY HONORS THESIS. THE METHODS DESCRIBED IN IT ARE BEING RESEARCHED AND EXTENDED TO A NEW REPO UNDER THE SAME NAME WHICH WILL REPLACE THIS ONE IN THE FUTURE.**
+
 PSHAX is a probabilistic seismic hazard analysis (PSHA) library written in Jax for my undergraduate honors thesis in the CU Boulder geography department. There are three parts:
 - pshax.numerics: A module full of numerical tools.
 - pshax.seismic: A module containing scenario modeling tools and the five GMMs from NGA-West2 (+AAY14 epistemic uncertainty).
@@ -13,7 +15,7 @@ I plan to expand this library as a demonstration of treating PSHA logic trees as
 
 ## Documentation
 
-
+I'm not documenting this repo because it isn't robust enough to be useful. It was written as a demonstration for my thesis, and while I'm proud of it, generalizing the methods enough to be useful will require total restructuring. This is something I'm working on right now.
 
 ## Usage
 
@@ -27,12 +29,11 @@ At the time of release, this library has not yet been benchmarked against widely
 
 ## Dependencies
 
+Don't worry about it.
+
 ## Installation
 
-Just run 
-```
-pip install git+https://github.com/ianmessa/PSHAX
-```
+I would recommend you just copy paste anything you're interested in or download the zip. Jax should be close to all you need.
 
 ## Citing PSHAX
 
@@ -42,15 +43,14 @@ Messa, I. (2026). Accelerated Propagation of Epistemic Uncertainty for PSHA Usin
 
 ## Acknowledgements
 
-This paper was written under the advisory of Morteza Karimzadeh and defended in front of a board led by Bill R. Travis, with sitting board members Stephen Becker and Shideh Dashti. 
+This paper was written under the advisory of Morteza Karimzadeh and defended in front of a board led by Bill R. Travis, with sitting board members Stephen Becker and Shideh Dashti. Huge thanks to everyone on the board, especially Morteza for giving himself a PSHA crash course in like a week.
 
 Extended thanks to my supervisors and colleagues at the USGS who have given me input on this project, including Morgan Moschetti, Nicolas Luco, Peter Powers, and Andrew Makdisi.
 
-Special thanks to Maxime Lacour, who met with me to discuss this research and clarify some details about his 2021 paper with Norm Abrahamson. 
+Thanks also to Maxime Lacour, who met with me to discuss this research and clarify some details about his 2021 paper with Norm Abrahamson. 
 
 ## References
 
 Lacour, M., & Abrahamson, N. (2021). Efficient Propagation of Epistemic Uncertainty for Probabilistic Seismic Hazard Analyses (PSHAs) Including Partial Correlation of Magnitude–Distance Scaling. Bulletin of the Seismological Society of America, 111 (6), 3332–3340. https://doi.org/10.1785/0120200381
 
 Lacour, M., & Abrahamson, N. (2025). Reducing Calculation Times for Seismic Hazard Using Non-Ergodic Ground-Motion Models for Areal Source Zones. Applied Sciences, 15(5), 2454. https://doi.org/10.3390/app15052454
-## Acknowledgements
