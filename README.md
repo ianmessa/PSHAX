@@ -4,7 +4,7 @@
 
 **THIS REPO EXISTS ONLY FOR POSTERITY'S SAKE. THE METHODS DESCRIBED IN IT ARE BEING RESEARCHED AND EXTENDED TO A NEW REPO UNDER THE SAME NAME WHICH WILL REPLACE THIS ONE IN THE FUTURE.**
 
-PSHAX is a probabilistic seismic hazard analysis (PSHA) library written in Jax for my undergraduate honors thesis in the CU Boulder geography department. There are three parts:
+PSHAX is a probabilistic seismic hazard analysis (PSHA) library built on top of JAX for my undergraduate honors thesis in the CU Boulder geography department. There are three parts:
 - pshax.numerics: A module full of numerical tools.
 - pshax.seismic: A module containing scenario modeling tools and the five GMMs from NGA-West2 (+AAY14 epistemic uncertainty).
 - pshax.hazcalc: A module containing the HazCalculator class.
